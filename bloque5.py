@@ -884,6 +884,23 @@ def main() -> None:
     	action='store_true',
     	help='Mostrar líneas de unión entre los dos semiciclos en el 3D de pares',
     )
+    # Flags adicionales expuestos para pairing y resumen (si faltan, añadir)
+    try:
+        _ = next(a for a in parser._actions if '--pair-y-mode' in getattr(a, 'option_strings', []))
+    except StopIteration:
+        parser.add_argument('--pair-y-mode', type=str, choices=['abs', 'scaled', 'auto'], default='abs',
+                            help="Modo para diferencia en 'y': abs (default), scaled o auto")
+    try:
+        _ = next(a for a in parser._actions if '--pair-hard-thresholds' in getattr(a, 'option_strings', []))
+    except StopIteration:
+        parser.add_argument('--pair-hard-thresholds', action='store_true',
+                            help='Excluir aristas que violen umbrales antes de resolver (hard-thresholds)')
+    try:
+        _ = next(a for a in parser._actions if '--summary-mode' in getattr(a, 'option_strings', []))
+    except StopIteration:
+        parser.add_argument('--summary-mode', type=str, choices=['pre', 'postpair', 'auto'], default='auto',
+                            help="Resumen: pre (antes de pairing), postpair (después), auto (regla de oro)")
+
     args = parser.parse_args()
     xml_path = args.xml_file
     k_use = args.k_use
@@ -1726,6 +1743,8 @@ def main() -> None:
                     pair_max_y_ks=args.pair_max_y_ks,
                     pair_min_weight_ratio=args.pair_min_weight_ratio,
                     pair_miss_penalty=args.pair_miss_penalty,
+                    y_mode=getattr(args, 'pair_y_mode', 'auto'),
+                    hard_thresholds=getattr(args, 'pair_hard_thresholds', True),
                     enforce_same_k=getattr(args, 'pair_enforce_same_k', False),
                 )
                 # Soporta ambas firmas: si se devuelve sólo una lista, envolver en tupla.
