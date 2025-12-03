@@ -1,0 +1,16 @@
+# Build/output
+out/
+seguimiento/
+
+# Python cache
+__pycache__/
+*/__pycache__/
+*.pyc
+*.pyo
+
+# Backups / temp
+*.tmp
+*.bak
+
+# OS
+.DS_Store

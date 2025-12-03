@@ -1,0 +1,1303 @@
+﻿#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+from __future__ import annotations
+
+ 
+
+import sys, os, json, traceback
+from pathlib import Path
+import numpy as np
+
+from PySide6.QtWidgets import (
+    QApplication, QMainWindow, QWidget, QFileDialog, QMessageBox,
+    QVBoxLayout, QHBoxLayout, QPushButton, QLabel, QComboBox, QCheckBox,
+    QPlainTextEdit
+)
+from PySide6.QtCore import Qt
+from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
+from matplotlib.figure import Figure
+
+# Imports locales (soportar ejecución como script o módulo)
+import pathlib as _pl
+_THIS = _pl.Path(__file__).resolve(); _ROOT = _THIS.parents[1]; _PKG = _THIS.parent
+for _p in (str(_ROOT), str(_PKG)):
+    (_p in sys.path) or sys.path.insert(0, _p)
+
+import prpd_core as core
+from report import export_pdf_report
+from datetime import datetime
+from utils_io import ensure_out_dirs, time_tag
+from prpd_ann import PRPDANN
+from three_d import plot_prpd_3d
+from PRPDapp.clouds import pixel_cluster_clouds, combine_clouds, select_dominant_clouds
+
+
+
+# ANN loader opcional (models/ann_loader)
+try:
+    from models.ann_loader import (
+        load_ann_model as _load_ann_model,
+        predict_proba as _ann_predict_proba,
+    )
+except Exception:
+    _load_ann_model = None
+    _ann_predict_proba = None
+
+
+APP_TITLE = "PRPD GUI — Unificada (exports v2)"
+
+
+class PRPDWindow(QMainWindow):
+    def __init__(self) -> None:
+        super().__init__()
+        self.setWindowTitle(APP_TITLE)
+        self.resize(1200, 740)
+
+        # Estado
+        self.current_path: Path | None = None
+        self.last_result: dict | None = None
+        self.auto_phase = True
+        self.current_points = None
+        self.current_labels = None
+
+        # ANN (fallback PRPDANN si no hay loader)
+        self.ann = PRPDANN(class_names=["cavidad","superficial","corona","flotante","ruido"])
+        self.ann_model = None
+        self.ann_classes: list[str] = []
+        # Auto-cargar models/ann.pkl si existe
+        try:
+            if _load_ann_model is not None:
+                self.ann_model, self.ann_classes = _load_ann_model(None)
+        except Exception:
+            pass
+
+        # UI
+        central = QWidget(self); self.setCentralWidget(central)
+        v = QVBoxLayout(central)
+
+        # Barra superior
+        top = QHBoxLayout()
+        self.btn_open = QPushButton("Abrir PRPD…")
+        self.btn_run  = QPushButton("Procesar")
+        self.btn_pdf  = QPushButton("Exportar PDF")
+        self.btn_load_ann = QPushButton("Cargar ANN")
+        self.btn_3d = QPushButton("3D")
+        self.btn_batch = QPushButton("Procesar carpeta")
+        self.btn_help = QPushButton("Ayuda/README")
+        self.btn_reset_base = QPushButton("Reset baseline")
+        self.btn_pdf.setEnabled(True)
+        # Seguimiento y criticidad (gap-time opcional)
+        self.chk_gap = QCheckBox("Gap-time XML")
+        self.btn_gap_pick = QPushButton("...")
+        self.btn_compare = QPushButton("Comparar vs base")
+
+        self.cmb_phase = QComboBox(); self.cmb_phase.addItems(["Auto (0/120/240)", "0°", "120°", "240°"]); self.cmb_phase.setCurrentIndex(0)
+        self.cmb_filter = QComboBox(); self.cmb_filter.addItems(["S1 Weak","S2 Strong","S2 Stronger"]); self.cmb_filter.setCurrentIndex(0)
+        self.chk_both_filters = QCheckBox("S1+S2 PNG"); self.chk_hist2d = QCheckBox("Densidad (hist2D)"); self.chk_hist2d.setChecked(True)
+
+        top.addWidget(self.btn_open)
+        top.addWidget(self.btn_run)
+        top.addWidget(QLabel("Fase:")); top.addWidget(self.cmb_phase)
+        top.addWidget(QLabel("Filtro:")); top.addWidget(self.cmb_filter); top.addWidget(self.chk_both_filters)
+        top.addStretch(1)
+        top.addWidget(self.chk_hist2d)
+        top.addWidget(self.btn_load_ann)
+        top.addWidget(self.btn_3d)
+        top.addWidget(self.btn_batch)
+        top.addWidget(self.btn_pdf)
+        top.addWidget(self.chk_gap)
+        top.addWidget(self.btn_gap_pick)
+        top.addWidget(self.btn_compare)
+        top.addWidget(self.btn_reset_base)
+        top.addWidget(self.btn_help)
+        v.addLayout(top)
+
+        # Figuras
+        fig = Figure(figsize=(10,6), dpi=100, constrained_layout=True)
+        self.canvas = FigureCanvas(fig)
+        self.ax_raw      = fig.add_subplot(2, 2, 1)
+        self.ax_filtered = fig.add_subplot(2, 2, 2)
+        self.ax_probs    = fig.add_subplot(2, 2, 3)
+        self.ax_text     = fig.add_subplot(2, 2, 4)
+        for a in [self.ax_raw, self.ax_filtered, self.ax_probs, self.ax_text]:
+            a.set_facecolor("#fafafa")
+        v.addWidget(self.canvas)
+
+        # Estado panel inferior izquierdo
+        self.cmb_plot = QComboBox(); self.cmb_plot.addItems(["Probabilidades","ANGPD","Nubes (S3)","Nubes (S4)","Nubes (S5)"]); self.cmb_plot.setCurrentIndex(0)
+        sub = QHBoxLayout(); sub.addWidget(QLabel("Vista:")); sub.addWidget(self.cmb_plot); sub.addStretch(1)
+        # Botón de exportación total
+        self.btn_export_all = QPushButton("Exportar todo los resultados")
+        sub.addWidget(self.btn_export_all)
+        v.addLayout(sub)
+
+        # Área resumen batch
+        batch_bar = QHBoxLayout()
+        batch_bar.addWidget(QLabel("Resumen Batch:"))
+        self.txtBatchSummary = QPlainTextEdit("")
+        self.txtBatchSummary.setReadOnly(True)
+        self.txtBatchSummary.setMaximumHeight(120)
+        batch_bar.addWidget(self.txtBatchSummary)
+        v.addLayout(batch_bar)
+
+        # Eventos
+        self.btn_open.clicked.connect(self.open_file_dialog)
+        self.btn_run.clicked.connect(self.run_pipeline)
+        self.btn_pdf.clicked.connect(self.export_pdf_clicked)
+        self.btn_export_all.clicked.connect(self.on_export_all_clicked)
+        self.btn_load_ann.clicked.connect(self.on_btnLoadANN_clicked)
+        self.btn_3d.clicked.connect(self.on_btn3D_clicked)
+        self.btn_batch.clicked.connect(self.on_btnBatch_clicked)
+        self.btn_help.clicked.connect(self.on_open_readme)
+        self.btn_reset_base.clicked.connect(self.on_reset_baseline)
+        self.btn_gap_pick.clicked.connect(self.on_pick_gap_xml)
+        self.btn_compare.clicked.connect(self.on_compare_vs_base)
+
+def run_pipeline(self) -> None:
+        if not self.current_path:
+            QMessageBox.warning(self, "Falta archivo", "Primero carga un CSV/XML de PRPD.")
+            return
+
+        try:
+            outdir = ensure_out_dirs(Path("out"))
+
+            # Fase
+            if self.auto_phase or self.cmb_phase.currentIndex() == 0:
+                force_offsets = None  # auto {0,120,240}
+            else:
+                idx = self.cmb_phase.currentIndex()
+                force_offsets = [int([0, 0, 120, 240][idx])]
+
+            # Filtro actual
+            filt_label = self.cmb_filter.currentText().strip()
+            result = core.process_prpd(
+                path=self.current_path,
+                out_root=outdir,
+                force_phase_offsets=force_offsets,
+                fast_mode=False,
+                filter_level=filt_label,
+            )
+            self.last_result = result
+
+            # Pintar en GUI
+            self.render_result(result)
+            self.btn_pdf.setEnabled(True)
+
+            # Export básico del filtro actual (ANGPD con qty en CSV)
+            out_reports = (Path(outdir) / "reports")
+            out_reports.mkdir(parents=True, exist_ok=True)
+            stem = self.current_path.stem if self.current_path else "session"
+
+            ang = result.get("angpd", {})
+            x  = np.asarray(ang.get("phi_centers", []), dtype=float)
+            y1 = np.asarray(ang.get("angpd", []), dtype=float)
+            y2 = np.asarray(ang.get("n_angpd", []), dtype=float)
+            y3 = np.asarray(ang.get("angpd_qty", []), dtype=float)
+            y4 = np.asarray(ang.get("n_angpd_qty", []), dtype=float)
+
+            if x.size:
+                with open(out_reports / f"{stem}_angpd.csv", "w", encoding="utf-8") as f:
+                    f.write("phi_deg,angpd,n_angpd,angpd_qty,n_angpd_qty\n")
+                    for i in range(x.size):
+                        a1 = float(y1[i]) if i < y1.size else 0.0
+                        a2 = float(y2[i]) if i < y2.size else 0.0
+                        a3 = float(y3[i]) if i < y3.size else 0.0
+                        a4 = float(y4[i]) if i < y4.size else 0.0
+                        f.write(f"{float(x[i]):.3f},{a1:.6f},{a2:.6f},{a3:.6f},{a4:.6f}\n")
+
+        except Exception as e:
+            traceback.print_exc()
+            QMessageBox.critical(self, "Error en pipeline", str(e))
+
+    # Ayuda
+    def on_open_readme(self) -> None:
+        readme = _ROOT / "README.md"
+        try:
+            if os.name == "nt":
+                os.startfile(str(readme))  # type: ignore[attr-defined]
+            else:
+                import webbrowser
+                webbrowser.open(str(readme))
+        except Exception:
+            QMessageBox.information(self, "README", f"Abre: {readme}")
+
+
+    # UI handlers
+    def open_file_dialog(self) -> None:
+        fn, _ = QFileDialog.getOpenFileName(self, "Selecciona archivo PRPD (CSV/XML)", "", "PRPD (*.csv *.xml);;CSV (*.csv);;XML (*.xml);;Todos (*.*)")
+        if not fn:
+            return
+        self.current_path = Path(fn)
+        try:
+            data = core.load_prpd(self.current_path)
+            self.plot_raw(data)
+        except Exception as e:
+            QMessageBox.critical(self, "Error al cargar", str(e))
+
+    def export_pdf_clicked(self) -> None:
+        if not self.last_result:
+            QMessageBox.warning(self, "Sin resultados", "Ejecuta primero el procesamiento.")
+            return
+        try:
+            pdf_path = export_pdf_report(self.last_result, Path("out"))
+            QMessageBox.information(self, "PDF exportado", f"Guardado en:\n{pdf_path}")
+        except Exception as e:
+            QMessageBox.critical(self, "Error exportando PDF", str(e))
+
+    def on_reset_baseline(self) -> None:
+        try:
+            if not self.last_result:
+                QMessageBox.information(self, "Baseline", "No hay resultados actuales.")
+                return
+            outdir = ensure_out_dirs(Path("out"))
+            out_reports = (Path(outdir) / 'reports'); out_reports.mkdir(parents=True, exist_ok=True)
+            stem = self.current_path.stem if self.current_path else 'session'
+            bd = self.last_result.get('severity_breakdown', {})
+            # Extender baseline con KPIs PRPD y metadatos, manteniendo claves originales para compatibilidad
+            ph = np.asarray(self.last_result.get('aligned',{}).get('phase_deg', []), dtype=float)
+            raw_amp = np.asarray(self.last_result.get('raw',{}).get('amplitude', []), dtype=float)
+            def _circ_mean_deg(arr):
+                try:
+                    if arr is None or arr.size == 0: return None
+                    sx = float(np.cos(np.deg2rad(arr)).sum()); sy = float(np.sin(np.deg2rad(arr)).sum())
+                    return float((np.rad2deg(np.arctan2(sy, sx)) + 360.0) % 360.0)
+                except Exception:
+                    return None
+            def _circ_width2_deg(arr):
+                try:
+                    if arr is None or arr.size == 0: return None
+                    C = float(np.cos(np.deg2rad(arr)).mean()); S = float(np.sin(np.deg2rad(arr)).mean())
+                    R = (C*C + S*S) ** 0.5
+                    if R <= 0: return None
+                    std_rad = float((-2.0 * np.log(max(R, 1e-12))) ** 0.5)
+                    return float(np.rad2deg(std_rad) * 2.0)
+                except Exception:
+                    return None
+            cur = {
+                # Claves históricas
+                'p95_amp': float(bd.get('p95_amp', 0.0)),
+                'dens': float(bd.get('dens', 0.0)),
+                'R_phase': float(bd.get('R_phase', 0.0)),
+                'std_circ_deg': float(bd.get('std_circ_deg', 0.0)),
+                'severity': float(self.last_result.get('severity_score', 0.0)),
+                # Metadatos y KPIs extendidos (no rompen lecturas existentes)
+                '__meta__': {
+                    'source_file': str(self.current_path) if self.current_path else None,
+                    'source_stem': stem,
+                    'created_utc': datetime.utcnow().isoformat(timespec='seconds') + 'Z',
+                    'filter_level': self.cmb_filter.currentText().strip() if hasattr(self, 'cmb_filter') else None,
+                    'phase_offset': int(self.last_result.get('phase_offset', 0)),
+                },
+                'kpi_ext': {
+                    'total_count': int(ph.size) if ph is not None else None,
+                    'tev_db': float(np.percentile(raw_amp, 95)) if raw_amp.size else None,
+                    'ang_width_deg': _circ_width2_deg(ph),
+                    'phase_center_deg': _circ_mean_deg(ph),
+                    'p50_ms': None,
+                    'p5_ms': None,
+                }
+            }
+            (out_reports / f"{stem}_baseline.json").write_text(json.dumps(cur, ensure_ascii=False, indent=2), encoding='utf-8')
+            QMessageBox.information(self, "Baseline", "Baseline actualizado con valores actuales.")
+            self.render_result(self.last_result)
+        except Exception as e:
+            QMessageBox.warning(self, "Baseline", f"No se pudo escribir baseline: {e}")
+
+    # ---- Seguimiento y criticidad ----
+    def on_pick_gap_xml(self) -> None:
+        fn, _ = QFileDialog.getOpenFileName(self, "Selecciona XML gap-time (opcional)", "", "XML (*.xml);;Todos (*.*)")
+        if fn:
+            setattr(self, '_gap_xml_path', fn)
+            QMessageBox.information(self, "Gap-time", f"Usando XML para gap-time:\n{fn}")
+
+    @staticmethod
+    def _circ_mean_deg(ph: np.ndarray) -> float | None:
+        try:
+            if ph is None or ph.size == 0:
+                return None
+            sx = float(np.cos(np.deg2rad(ph)).sum())
+            sy = float(np.sin(np.deg2rad(ph)).sum())
+            ang = float((np.rad2deg(np.arctan2(sy, sx)) + 360.0) % 360.0)
+            return ang
+        except Exception:
+            return None
+
+    @staticmethod
+    def _circ_std2_deg(ph: np.ndarray) -> float | None:
+        try:
+            if ph is None or ph.size == 0:
+                return None
+            C = float(np.cos(np.deg2rad(ph)).mean())
+            S = float(np.sin(np.deg2rad(ph)).mean())
+            R = (C*C + S*S) ** 0.5
+            if R <= 0:
+                return None
+            std_rad = float((-2.0 * np.log(max(R, 1e-12))) ** 0.5)
+            return float(np.rad2deg(std_rad) * 2.0)
+        except Exception:
+            return None
+
+    @staticmethod
+    def _compute_gap(xml_path: str) -> dict:
+        try:
+            import xml.etree.ElementTree as ET
+            root = ET.parse(xml_path).getroot()
+            times_text = None
+            for tag in root.iter():
+                t = (tag.tag or '').lower()
+                if t.endswith('times'):
+                    times_text = (tag.text or '').strip(); break
+            if not times_text:
+                return {}
+            parts = [p for p in times_text.replace("\n"," ").replace("\t"," ").split(' ') if p]
+            times = np.asarray(list(map(float, parts)), dtype=float)
+            if times.size < 2:
+                return {}
+            diffs = np.diff(np.sort(times)); diffs = diffs[diffs > 0]
+            if diffs.size == 0:
+                return {}
+            return {'p50_ms': float(np.percentile(diffs, 50)), 'p5_ms': float(np.percentile(diffs, 5))}
+        except Exception:
+            return {}
+
+    @staticmethod
+    def _safe_append_summary(path: Path, kv: dict) -> Path | None:
+        try:
+            txt0 = path.read_text(encoding='utf-8') if path.exists() else ''
+            lines = [l for l in txt0.splitlines()]
+            if lines and lines[-1].strip() != '':
+                lines.append('')
+            for k,v in kv.items():
+                lines.append(f"{k},{v}")
+            tmp = path.with_suffix(path.suffix + '.tmp')
+            tmp.write_text("\n".join(lines) + "\n", encoding='utf-8')
+            try:
+                tmp.replace(path); return path
+            except PermissionError:
+                safe = path.with_name(path.stem + '_safe' + path.suffix)
+                tmp.replace(safe); return safe
+        except Exception:
+            return None
+
+    def on_compare_vs_base(self) -> None:
+        if not self.last_result:
+            QMessageBox.information(self, "Comparar", "Procesa primero un PRPD.")
+            return
+        try:
+            outdir = ensure_out_dirs(Path("out")); out_reports = Path(outdir)/'reports'
+            out_reports.mkdir(parents=True, exist_ok=True)
+            stem = self.current_path.stem if self.current_path else 'session'
+
+            r = self.last_result
+            ph = np.asarray(r.get('aligned',{}).get('phase_deg', []), dtype=float)
+            amp = np.asarray(r.get('aligned',{}).get('amplitude', []), dtype=float)
+            raw_amp = np.asarray(r.get('raw',{}).get('amplitude', []), dtype=float)
+
+            # KPIs actuales
+            total_count = int(ph.size)
+            tev_db = float(np.percentile(raw_amp, 95)) if raw_amp.size else None
+            ang_width = self._circ_std2_deg(ph)
+            phase_center = self._circ_mean_deg(ph)
+
+            # Gap opcional
+            gap = {}
+            if self.chk_gap.isChecked():
+                gx = getattr(self, '_gap_xml_path', None)
+                if gx:
+                    gap = self._compute_gap(gx) or {}
+
+            # Baseline
+            base_path = out_reports / f"{stem}_baseline.json"
+            base = {}
+            if base_path.exists():
+                try:
+                    base = json.loads(base_path.read_text(encoding='utf-8'))
+                except Exception:
+                    base = {}
+            # Validar correspondencia por fuente (si tiene meta)
+            try:
+                meta = base.get('__meta__', {}) if isinstance(base, dict) else {}
+                src_ok = (not meta) or (meta.get('source_stem') == stem)
+                if not src_ok:
+                    base = {}
+            except Exception:
+                pass
+
+            def pct_delta(a, b):
+                try:
+                    if a is None or b is None:
+                        return None
+                    b = float(b)
+                    if b == 0:
+                        return float('inf') if (a or 0) > 0 else 0.0
+                    return (float(a) - b) / b
+                except Exception:
+                    return None
+
+            def circ_delta(a, b):
+                try:
+                    if a is None or b is None:
+                        return None
+                    return abs(((float(a) - float(b)) + 180.0) % 360.0 - 180.0)
+                except Exception:
+                    return None
+
+            # Baseline extendido puede venir en kpi_ext
+            bx = base.get('kpi_ext', {}) if isinstance(base, dict) else {}
+            count_base = (bx.get('total_count') if bx else base.get('total_count')) if isinstance(base, dict) else None
+            count_dpct = pct_delta(total_count, count_base)
+
+            tev_base = (bx.get('tev_db') if bx else base.get('tev_db')) if isinstance(base, dict) else None
+            tev_delta_db = None
+            try:
+                if tev_db is not None and tev_base is not None and float(tev_base) > 0:
+                    tev_delta_db = 20.0 * np.log10(max(float(tev_db) / max(float(tev_base), 1e-9), 1e-9))
+            except Exception:
+                tev_delta_db = None
+
+            ang_base = (bx.get('ang_width_deg') if bx else base.get('ang_width_deg')) if isinstance(base, dict) else None
+            if ang_base is None:
+                ang_base = base.get('std_circ_deg') if isinstance(base, dict) else None
+            ang_dpct = pct_delta(ang_width, ang_base)
+
+            phase_base = (bx.get('phase_center_deg') if bx else base.get('phase_center_deg')) if isinstance(base, dict) else None
+            phase_shift_deg = circ_delta(phase_center, phase_base)
+
+            # TEV asimetría (aprox con raw_amp por semiciclo)
+            tev_asym_db = None
+            try:
+                if ph.size and raw_amp.size:
+                    pos = raw_amp[(ph % 360.0) < 180.0]
+                    neg = raw_amp[(ph % 360.0) >= 180.0]
+                    if pos.size and neg.size:
+                        p95_pos = float(np.percentile(pos, 95)); p95_neg = float(np.percentile(neg, 95))
+                        tev_asym_db = abs(p95_pos - p95_neg)
+            except Exception:
+                tev_asym_db = None
+
+            # Flags
+            flag_count = 'green'
+            if count_dpct is not None:
+                if count_dpct >= 0.50: flag_count = 'red'
+                elif count_dpct >= 0.30: flag_count = 'orange'
+
+            flag_tev = 'green'
+            if tev_delta_db is not None:
+                if tev_delta_db > 6.0: flag_tev = 'red'
+                elif tev_delta_db >= 3.0: flag_tev = 'orange'
+                try:
+                    if tev_asym_db is not None and tev_asym_db <= 3.0 and flag_tev != 'green':
+                        flag_tev = 'red'
+                except Exception:
+                    pass
+
+            flag_ancho = 'green'
+            if ang_dpct is not None:
+                if ang_dpct >= 0.40: flag_ancho = 'red'
+                elif ang_dpct >= 0.20: flag_ancho = 'orange'
+
+            flag_phase = 'green'
+            if phase_shift_deg is not None:
+                if phase_shift_deg >= 20.0: flag_phase = 'red'
+                elif phase_shift_deg >= 10.0: flag_phase = 'orange'
+
+            # Gap rules
+            flag_gap = 'green'
+            GAP_P50_RED = 7.0; GAP_P5_RED = 3.0
+            p50_cur = gap.get('p50_ms'); p5_cur = gap.get('p5_ms')
+            p50_base = (bx.get('p50_ms') if bx else base.get('p50_ms')) if isinstance(base, dict) else None
+            p5_base = (bx.get('p5_ms') if bx else base.get('p5_ms')) if isinstance(base, dict) else None
+            try:
+                severe_now = ((p50_cur is not None and p50_cur < GAP_P50_RED) or (p5_cur is not None and p5_cur < GAP_P5_RED))
+                drop_p50 = None
+                if p50_cur is not None and p50_base is not None and float(p50_base) > 0:
+                    drop_p50 = max(0.0, (float(p50_base) - float(p50_cur)) / float(p50_base))
+                if severe_now: flag_gap = 'red'
+                elif drop_p50 is not None and drop_p50 >= 0.30: flag_gap = 'red'
+                elif drop_p50 is not None and drop_p50 >= 0.10: flag_gap = 'orange'
+            except Exception:
+                flag_gap = 'green'
+
+            # Criticidad global
+            flags = [flag_count, flag_tev, flag_ancho, flag_phase, flag_gap]
+            criticidad = 'red' if 'red' in flags else ('orange' if 'orange' in flags else 'green')
+            decision = 'Inspección prioritaria' if criticidad == 'red' else ('Monitorear y re-evaluar' if criticidad == 'orange' else 'OK')
+
+            # Persistencia: summary.csv (si existe en out) y JSON de tracking en reports
+            nd = 'N/D'
+            kv = {
+                'kpi_count_delta_pct': (f"{count_dpct:.4f}" if count_dpct is not None else nd),
+                'tev_delta_db': (f"{tev_delta_db:.3f}" if tev_delta_db is not None else nd),
+                'tev_asym_db': (f"{tev_asym_db:.3f}" if tev_asym_db is not None else nd),
+                'ang_width_deg_act': (f"{ang_width:.3f}" if ang_width is not None else nd),
+                'ang_width_deg_base': (f"{(ang_base if ang_base is not None else 0):.3f}" if ang_base is not None else nd),
+                'ang_width_delta_pct': (f"{ang_dpct:.4f}" if ang_dpct is not None else nd),
+                'phase_shift_deg': (f"{(phase_shift_deg if phase_shift_deg is not None else 0):.3f}" if phase_shift_deg is not None else nd),
+                'p50_ms': (f"{p50_cur:.3f}" if p50_cur is not None else nd),
+                'p5_ms': (f"{p5_cur:.3f}" if p5_cur is not None else nd),
+                'kpi_flags.count': flag_count,
+                'kpi_flags.tev': flag_tev,
+                'kpi_flags.ancho': flag_ancho,
+                'kpi_flags.phase': flag_phase,
+                'kpi_flags.gap': flag_gap,
+                'criticidad_global': criticidad,
+                'decision_recomendada': decision,
+            }
+            # summary.csv si existe
+            summary_csv = Path(outdir) / f"{stem}_summary.csv"
+            wrote_csv = self._safe_append_summary(summary_csv, kv) if summary_csv.exists() else None
+            # Tracking JSON
+            tracking = {
+                'actual': {
+                    'total_count': total_count,
+                    'tev_db': tev_db,
+                    'ang_width_deg': ang_width,
+                    'phase_center_deg': phase_center,
+                    **(gap or {}),
+                },
+                'baseline': base,
+                'flags': {
+                    'count': flag_count, 'tev': flag_tev, 'ancho': flag_ancho, 'phase': flag_phase, 'gap': flag_gap,
+                },
+                'criticidad_global': criticidad,
+                'decision_recomendada': decision,
+            }
+            (out_reports / f"{stem}_kpi_tracking.json").write_text(json.dumps(tracking, ensure_ascii=False, indent=2), encoding='utf-8')
+
+            msg = (
+                f"?Conteo: {kv['kpi_count_delta_pct']} | ?TEV(dB): {kv['tev_delta_db']} | Asim: {kv['tev_asym_db']}\n"
+                f"Ancho act/base/?%: {kv['ang_width_deg_act']} / {kv['ang_width_deg_base']} / {kv['ang_width_delta_pct']} | Fase ?°: {kv['phase_shift_deg']}\n"
+                f"Gap p50/p5 ms: {kv['p50_ms']} / {kv['p5_ms']}\n"
+                f"Flags: count={flag_count}, tev={flag_tev}, ancho={flag_ancho}, phase={flag_phase}, gap={flag_gap}\n"
+                f"Criticidad: {criticidad} | Decisión: {decision} | summary.csv: {'OK' if wrote_csv else 'N/D'}"
+            )
+            QMessageBox.information(self, "Comparar vs base", msg)
+        except Exception as e:
+            QMessageBox.warning(self, "Comparar vs base", f"Error: {e}")
+
+    # Plots
+    def plot_raw(self, data: dict) -> None:
+        self.ax_raw.clear()
+        try:
+            ph = np.asarray(data.get("phase_deg", []), dtype=float)
+            amp = np.asarray(data.get("amplitude", []), dtype=float)
+            if self.chk_hist2d.isChecked() and ph.size and amp.size:
+                H, xedges, yedges = np.histogram2d(ph, amp, bins=[72, 50], range=[[0,360],[0,100]])
+                self.ax_raw.imshow(H.T + 1e-9, origin='lower', aspect='auto', extent=[xedges[0], xedges[-1], yedges[0], yedges[-1]])
+            else:
+                self.ax_raw.scatter(ph, amp, s=4, alpha=0.6)
+        except Exception:
+            pass
+        self.ax_raw.set_title("PRPD crudo")
+        self.ax_raw.set_xlim(0, 360); self.ax_raw.set_xlabel("Fase (°)")
+        self.ax_raw.set_ylabel("Amplitud")
+        self.ax_raw.set_ylim(0, 100)
+        self.canvas.draw_idle()
+
+    def _draw_histograms_semiciclo(self, r: dict) -> None:
+        """Dibuja Histogramas por semiciclos en dos paneles:
+        - ax_filtered: H_amp+ y H_amp- (N=16)
+        - ax_text:     H_ph+ y H_ph-   (N=16)
+        """
+        ax = self.ax_filtered
+        ax.clear()
+        try:
+            ph = np.asarray(r.get("aligned", {}).get("phase_deg", []), dtype=float)
+            amp = np.asarray(r.get("aligned", {}).get("amplitude", []), dtype=float)
+            if not (ph.size and amp.size):
+                ax.text(0.5,0.5,'Sin datos',ha='center',va='center');
+                self.ax_text.clear(); self.ax_text.text(0.5,0.5,'Sin datos',ha='center',va='center');
+                return
+            N = 16
+            phi = ph % 360.0
+            pos = (phi < 180.0)
+            neg = ~pos
+            # H_amp en panel superior derecho
+            a_pos, _ = np.histogram(amp[pos], bins=N, range=(0.0, 100.0))
+            a_neg, _ = np.histogram(amp[neg], bins=N, range=(0.0, 100.0))
+            Ha_pos = np.log10(1.0 + a_pos.astype(float))
+            Ha_neg = np.log10(1.0 + a_neg.astype(float))
+            m_amp = float(max(Ha_pos.max() if Ha_pos.size else 0.0, Ha_neg.max() if Ha_neg.size else 0.0, 1.0))
+            Ha_pos = Ha_pos / m_amp; Ha_neg = Ha_neg / m_amp
+            xi = np.arange(1, N+1)
+            ax.plot(xi, Ha_pos, '-o', color='#1f77b4', label='H_amp+')
+            ax.plot(xi, Ha_neg, '-o', color='#d62728', label='H_amp-')
+            ax.set_xlabel('Indice de ventana (N=16)'); ax.set_ylabel('H_amp (norm)'); ax.set_title('Histograma de Amplitud (N=16)')
+            ax.legend(loc='upper right', fontsize=8)
+            # H_ph en panel inferior derecho
+            bx = self.ax_text
+            bx.clear()
+            phi_pos = phi[pos]; phi_neg = (phi[neg] - 180.0)
+            p_pos, _ = np.histogram(phi_pos, bins=N, range=(0.0, 180.0))
+            p_neg, _ = np.histogram(phi_neg, bins=N, range=(0.0, 180.0))
+            Hp_pos = np.log10(1.0 + p_pos.astype(float))
+            Hp_neg = np.log10(1.0 + p_neg.astype(float))
+            m_ph = float(max(Hp_pos.max() if Hp_pos.size else 0.0, Hp_neg.max() if Hp_neg.size else 0.0, 1.0))
+            Hp_pos = Hp_pos / m_ph; Hp_neg = Hp_neg / m_ph
+            bx.plot(xi, Hp_pos, '-o', color='#1f77b4', label='H_ph+')
+            bx.plot(xi, Hp_neg, '-o', color='#d62728', label='H_ph-')
+            bx.set_xlabel('Indice de ventana (N=16)'); bx.set_ylabel('H_ph (norm)'); bx.set_title('Histograma de Fase (N=16)')
+            bx.legend(loc='upper right', fontsize=8)
+        except Exception:
+            ax.text(0.5,0.5,'Error histogramas',ha='center',va='center');
+            try:
+                self.ax_text.text(0.5,0.5,'Error histogramas',ha='center',va='center')
+            except Exception:
+                pass
+
+    def render_result(self, r: dict) -> None:
+        # Crudo con overlay de ruido
+        self.ax_raw.clear()
+        try:
+            ph0 = np.asarray(r.get("raw", {}).get("phase_deg", []), dtype=float)
+            a0 = np.asarray(r.get("raw", {}).get("amplitude", []), dtype=float)
+            if self.chk_hist2d.isChecked() and ph0.size and a0.size:
+                H0, xe0, ye0 = np.histogram2d(ph0, a0, bins=[72,50], range=[[0,360],[0,100]])
+                self.ax_raw.imshow(H0.T + 1e-9, origin='lower', aspect='auto', extent=[xe0[0], xe0[-1], ye0[0], ye0[-1]])
+                # Overlay ruido (gris tenue)
+                labels = np.asarray(r.get('labels', []))
+                keep = np.asarray(r.get('keep_mask', []), dtype=bool)
+                if labels.size and keep.size and ph0.size == labels.size and a0.size == labels.size:
+                    raw_keep = keep & (labels >= 0)
+                    noise_idx = ~raw_keep
+                    self.ax_raw.scatter(ph0[noise_idx], a0[noise_idx], s=2, alpha=0.12, color='#888888')
+            else:
+                self.ax_raw.scatter(ph0, a0, s=3, alpha=0.4)
+        except Exception:
+            pass
+        self.ax_raw.set_title("PRPD crudo"); self.ax_raw.set_xlim(0,360); self.ax_raw.set_xlabel("Fase (°)"); self.ax_raw.set_ylabel("Amplitud")
+
+        # Alineado/filtrado con overlay de ruido
+        self.ax_filtered.clear()
+        ph_al = np.asarray(r.get("aligned", {}).get("phase_deg", []), dtype=float)
+        amp_al = np.asarray(r.get("aligned", {}).get("amplitude", []), dtype=float)
+        try:
+            if self.chk_hist2d.isChecked() and ph_al.size and amp_al.size:
+                H2, xe2, ye2 = np.histogram2d(ph_al, amp_al, bins=[72,50], range=[[0,360],[0,100]])
+                self.ax_filtered.imshow(H2.T + 1e-9, origin='lower', aspect='auto', extent=[xe2[0], xe2[-1], ye2[0], ye2[-1]])
+            else:
+                self.ax_filtered.scatter(ph_al, amp_al, s=3, alpha=0.85)
+            # Overlay de ruido gris tenue cuando hay heatmap
+            labels = np.asarray(r.get('labels', []))
+            keep = np.asarray(r.get('keep_mask', []), dtype=bool)
+            raw = r.get('raw', {})
+            ph_raw = np.asarray(raw.get('phase_deg', []), dtype=float)
+            amp_raw = np.asarray(raw.get('amplitude', []), dtype=float)
+            if labels.size and keep.size and ph_raw.size == labels.size and amp_raw.size == labels.size:
+                raw_keep = keep & (labels >= 0)
+                noise_idx = ~raw_keep
+                self.ax_filtered.scatter(ph_raw[noise_idx], amp_raw[noise_idx], s=2, alpha=0.15, color='#888888')
+        except Exception:
+            pass
+        self.ax_filtered.set_title(f"Alineado/filtrado (offset={r.get('phase_offset',0)}°)")
+        self.ax_filtered.set_xlim(0,360); self.ax_filtered.set_xlabel("Fase (°)"); self.ax_filtered.set_ylabel("Amplitud")
+
+        # Fijar escala Y de 0..100 para la vista alineada/filtrada
+        try:
+            self.ax_filtered.set_ylim(0, 100)
+        except Exception:
+            pass
+        # Panel inferior izquierdo: Probabilidades / ANGPD / Nubes (S3/S4/S5)
+        self.ax_probs.clear()
+        view_mode = self.cmb_plot.currentText().strip().lower()
+        classes = ["cavidad","superficial","corona","flotante"]
+        proba_dict = r.get("probs", {})
+
+        if view_mode.startswith("angpd"):
+            try:
+                self._draw_histograms_semiciclo(r)
+            except Exception:
+                pass
+            ang = r.get("angpd", {})
+            x = np.asarray(ang.get("phi_centers", []), dtype=float)
+            y1 = np.asarray(ang.get("angpd", []), dtype=float)
+            y2 = np.asarray(ang.get("n_angpd", []), dtype=float)
+            y3 = np.asarray(ang.get("angpd_qty", []), dtype=float)
+            y4 = np.asarray(ang.get("n_angpd_qty", []), dtype=float)
+            if x.size and (y1.size or y2.size or y3.size or y4.size):
+                if y1.size: self.ax_probs.plot(x, y1, label="ANGPD (sum=1)")
+                if y2.size: self.ax_probs.plot(x, y2, label="N-ANGPD (max=1)")
+                # Las curvas por quantity se dibujan solo en el panel derecho
+                self.ax_probs.set_xlim(0,360); self.ax_probs.set_xlabel("Fase (°)"); self.ax_probs.set_ylabel("Densidad")
+                self.ax_probs.set_title("ANGPD / N-ANGPD"); self.ax_probs.legend(loc="upper right", fontsize=8)
+                # (Opcional) Si se desea resaltar ANGPD, puede escalarse x100
+                # self.ax_probs.plot(x, y1*100.0, color="#1f77b4", alpha=0.5)
+                # Panel derecho: ANGPD/N-ANGPD ponderado por quantity separado
+                try:
+                    axq = self.ax_text; axq.clear(); axq.set_facecolor("#fafafa")
+                    if y3.size or y4.size:
+                        if y4.size: axq.plot(x, y4, label="N-ANGPD qty (max=1)", color="#d62728")
+                        if y3.size:
+                            axq2 = axq.twinx()
+                            axq2.plot(x, y3*100.0, label="ANGPD qty (sum=1) x100", color="#2ca02c")
+                            axq2.set_ylabel("Densidad (x100)")
+                        axq.set_xlim(0,360); axq.set_xlabel("Fase (?)"); axq.set_ylabel("Densidad"); axq.set_title("ANGPD / N-ANGPD (quantity)")
+                        try:
+                            h1,l1 = axq.get_legend_handles_labels()
+                            if 'axq2' in locals():
+                                h2,l2 = axq2.get_legend_handles_labels(); axq.legend(h1+h2,l1+l2,loc='upper right', fontsize=8)
+                            else:
+                                axq.legend(loc='upper right', fontsize=8)
+                        except Exception:
+                            pass
+                    else:
+                        axq.axis('on'); axq.text(0.5,0.5,'Sin quantity en XML',ha='center',va='center'); axq.set_xticks([]); axq.set_yticks([])
+                except Exception:
+                    pass
+                # Redibujo seguro del panel de quantity para asegurar visibilidad
+                try:
+                    axq = self.ax_text
+                    axq.clear()
+                    if y4.size: axq.plot(x, y4, label="N-ANGPD qty (max=1)", color="#d62728")
+                    if y3.size: axq.plot(x, y3*100.0, label="ANGPD qty (sum=1) x100", color="#2ca02c")
+                    axq.set_xlim(0,360); axq.set_xlabel("Fase (?)"); axq.set_ylabel("Densidad / Densidad(x100)")
+                    axq.set_title("ANGPD / N-ANGPD (quantity)"); axq.legend(loc='upper right', fontsize=8)
+                except Exception:
+                    pass
+            else:
+                self.ax_probs.text(0.5, 0.5, "Sin datos ANGPD", ha="center", va="center")
+        elif view_mode.startswith("nubes"):
+            ph = ph_al; amp = amp_al
+            # Preparar listas S3/S4/S5
+            clouds_s3 = pixel_cluster_clouds(ph, amp) if (ph.size and amp.size) else []
+            clouds_s4 = combine_clouds(clouds_s3) if clouds_s3 else []
+            # Por consistencia con exportes existentes, S5 se calcula desde S3
+            clouds_s5 = select_dominant_clouds(clouds_s3) if clouds_s3 else []
+
+            mode = view_mode.replace("nubes", "").strip()
+            if mode.startswith("(s4)"):
+                clouds = clouds_s4
+                title = "Nubes combinadas (S4)"
+            elif mode.startswith("(s5)"):
+                clouds = clouds_s5
+                # Agregar k al título
+                try:
+                    k_val = len(clouds) if clouds is not None else 0
+                    title = f"Nubes dominantes (S5) — k={k_val}"
+                except Exception:
+                    title = "Nubes dominantes (S5)"
+            else:
+                clouds = clouds_s3
+                title = "Nubes crudas (S3)"
+
+            if ph.size and amp.size and clouds:
+                import numpy as _np
+                centers = _np.array([[c.get("phase_mean",0.0), c.get("y_mean",0.0)] for c in clouds], dtype=float)
+                lbl = _np.zeros(ph.shape[0], dtype=int)
+                for i in range(ph.shape[0]):
+                    dp = _np.minimum.reduce([_np.abs(ph[i]-centers[:,0]), _np.abs(ph[i]-centers[:,0]-180), _np.abs(ph[i]-centers[:,0]+180)])
+                    dy = _np.abs(amp[i]-centers[:,1])
+                    j = int(_np.argmin(0.6*dp + 0.4*dy))
+                    lbl[i] = j
+                cols = ["#1f77b4","#ff7f0e","#2ca02c","#d62728","#9467bd","#8c564b"]
+                for j in range(len(clouds)):
+                    m = (lbl==j)
+                    if _np.any(m): self.ax_probs.scatter(ph[m], amp[m], s=6, alpha=0.7, color=cols[j%len(cols)], label=f"C{j+1}")
+                for j,c in enumerate(clouds):
+                    self.ax_probs.scatter([c.get("phase_mean",0.0)], [c.get("y_mean",0.0)], s=60, color=cols[j%len(cols)], edgecolors='black')
+                self.ax_probs.set_xlim(0,360); self.ax_probs.set_xlabel("Fase (°)"); self.ax_probs.set_ylabel("Amplitud")
+                self.ax_probs.set_title(title); self.ax_probs.legend(loc='upper right', fontsize=8)
+            else:
+                self.ax_probs.text(0.5,0.5,"Sin nubes",ha="center",va="center")
+        else:
+            probs = [proba_dict.get(k,0.0) for k in classes]
+            self.ax_probs.bar(classes, probs)
+            self.ax_probs.set_ylim(0,1)
+            self.ax_probs.set_title("Probabilidades")
+
+        # Mantener 0..100 en vistas de Nubes (S3/S4/S5)
+        try:
+            if view_mode.startswith("nubes"):
+                self.ax_probs.set_ylim(0, 100)
+        except Exception:
+            pass
+
+        try:
+            self.canvas.figure.tight_layout()
+        except Exception:
+            pass
+
+        self.canvas.draw_idle()
+        
+        # Fase
+        if self.auto_phase or self.cmb_phase.currentIndex() == 0:
+            force_offsets = None  # auto {0,120,240}
+        else:
+            idx = self.cmb_phase.currentIndex()
+            val = [0, 0, 120, 240][idx]
+            force_offsets = [int(val)]
+
+        # Filtro
+        filt_label = self.cmb_filter.currentText().strip()
+        result = core.process_prpd(
+            path=self.current_path,
+            out_root=outdir,
+            force_phase_offsets=force_offsets,
+            fast_mode=False,
+            filter_level=filt_label,
+        )
+        self.last_result = result
+
+        try:
+            self.render_result(result)
+        except Exception:
+            pass
+
+
+            # Exportes out/reports
+            out_reports = (Path(outdir) / 'reports'); out_reports.mkdir(parents=True, exist_ok=True)
+            stem = self.current_path.stem if self.current_path else 'session'
+            # ANGPD CSV + PNG
+            try:
+                ang = result.get('angpd', {})
+                x = np.asarray(ang.get('phi_centers', []), dtype=float)
+                y1 = np.asarray(ang.get('angpd', []), dtype=float)
+                y2 = np.asarray(ang.get('n_angpd', []), dtype=float)
+                if x.size:
+                    with open(out_reports / f"{stem}_angpd.csv", 'w', encoding='utf-8') as f:
+                        f.write('phi_deg,angpd,n_angpd\n')
+                        for i in range(x.size):
+                            a1 = float(y1[i]) if i < y1.size else 0.0
+                            a2 = float(y2[i]) if i < y2.size else 0.0
+                            f.write(f"{float(x[i]):.3f},{a1:.6f},{a2:.6f}\n")
+                    import matplotlib.pyplot as _plt
+                    fig,_ax = _plt.subplots(figsize=(5,3), dpi=120)
+                    if y1.size: _ax.plot(x, y1, label='ANGPD (sum=1)')
+                    if y2.size: _ax.plot(x, y2, label='N-ANGPD (max=1)')
+                    _ax.set_xlim(0,360); _ax.set_xlabel('Fase (°)'); _ax.set_ylabel('Densidad')
+                    _ax.set_title('ANGPD / N-ANGPD'); _ax.legend(loc='upper right', fontsize=8)
+                    fig.tight_layout(); fig.savefig(out_reports / f"{stem}_angpd.png", bbox_inches='tight'); _plt.close(fig)
+            except Exception:
+                pass
+                    # Si vista ANGPD: reemplazar alineado/filtrado por histogramas de fase y amplitud
+            ax = self.ax_filtered
+            ax.clear()
+            N = 16
+            if ph_al.size and amp_al.size:
+                phi = np.asarray(ph_al, dtype=float) % 360.0
+                ampv = np.asarray(amp_al, dtype=float)
+                mask_pos = (phi < 180.0)
+                mask_neg = ~mask_pos
+                a_pos, _ = np.histogram(ampv[mask_pos], bins=N, range=(0.0, 100.0))
+                a_neg, _ = np.histogram(ampv[mask_neg], bins=N, range=(0.0, 100.0))
+                Ha_pos = np.log10(1.0 + a_pos.astype(float))
+                Ha_neg = np.log10(1.0 + a_neg.astype(float))
+                m_amp = max(float(Ha_pos.max()), float(Ha_neg.max()), 1.0)
+                Ha_pos = Ha_pos / m_amp
+                Ha_neg = Ha_neg / m_amp
+                phi_pos = phi[mask_pos]
+                phi_neg = (phi[mask_neg] - 180.0)
+                p_pos, _ = np.histogram(phi_pos, bins=N, range=(0.0, 180.0))
+                p_neg, _ = np.histogram(phi_neg, bins=N, range=(0.0, 180.0))
+                Hp_pos = np.log10(1.0 + p_pos.astype(float))
+                Hp_neg = np.log10(1.0 + p_neg.astype(float))
+                m_ph = max(float(Hp_pos.max()), float(Hp_neg.max()), 1.0)
+                Hp_pos = Hp_pos / m_ph
+                Hp_neg = Hp_neg / m_ph
+                xi = np.arange(1, N+1)
+                ax.plot(xi, Ha_pos, "-o", color="#1f77b4", label="H_amp+")
+                ax.plot(xi, Ha_neg, "-o", color="#d62728", label="H_amp-")
+                ax2 = ax.twinx()
+                ax2.plot(xi, Hp_pos, "--d", color="#1f77b4", label="H_ph+")
+                ax2.plot(xi, Hp_neg, "--d", color="#d62728", label="H_ph-")
+                ax.set_xlabel('Indice de ventana (N=16)')
+                ax.set_ylabel('H_amp (norm)')
+                ax2.set_ylabel('H_ph (norm)')
+                ax.set_title('Histogramas Fase/Amplitud (N=16)')
+                try:
+                    h1,l1 = ax.get_legend_handles_labels()
+                    h2,l2 = ax2.get_legend_handles_labels()
+                    ax.legend(h1+h2, l1+l2, loc='upper right', fontsize=8)
+                except Exception:
+                    pass
+            else:
+                ax.text(0.5,0.5,'Sin datos',ha='center',va='center')
+                pass
+            # Nubes CSVs + PNG
+            try:
+                ph = np.asarray(result.get('aligned', {}).get('phase_deg', []), dtype=float)
+                amp = np.asarray(result.get('aligned', {}).get('amplitude', []), dtype=float)
+                if ph.size and amp.size:
+                    clouds_all = pixel_cluster_clouds(ph, amp)
+                    clouds_comb = combine_clouds(clouds_all)
+                    clouds_sel = select_dominant_clouds(clouds_all)
+                    with open(out_reports / f"{stem}_clouds_raw.csv", 'w', encoding='utf-8') as f:
+                        f.write('id,count,frac,phase_mean,y_mean\n')
+                        for c in clouds_all:
+                            f.write(f"{int(c.get('id',0))},{int(c.get('count',0))},{float(c.get('frac',0.0)):.6f},{float(c.get('phase_mean',0.0)):.2f},{float(c.get('y_mean',0.0)):.2f}\n")
+                    with open(out_reports / f"{stem}_clouds_combined.csv", 'w', encoding='utf-8') as f:
+                        f.write('ids,count,phase_mean,y_mean\n')
+                        for c in clouds_comb:
+                            ids = ';'.join(map(str, c.get('ids', [])))
+                            f.write(f"{ids},{int(c.get('count',0))},{float(c.get('phase_mean',0.0)):.2f},{float(c.get('y_mean',0.0)):.2f}\n")
+                    with open(out_reports / f"{stem}_clouds_selected.csv", 'w', encoding='utf-8') as f:
+                        f.write('id,count,frac,phase_mean,y_mean\n')
+                        for c in clouds_sel:
+                            f.write(f"{int(c.get('id',0))},{int(c.get('count',0))},{float(c.get('frac',0.0)):.6f},{float(c.get('phase_mean',0.0)):.2f},{float(c.get('y_mean',0.0)):.2f}\n")
+                    import matplotlib.pyplot as _plt, numpy as _np
+                    cols = ['#1f77b4','#ff7f0e','#2ca02c','#d62728','#9467bd','#8c564b']
+                    fig,_ax = _plt.subplots(figsize=(5,4), dpi=120)
+                    centers = _np.array([[c.get('phase_mean',0.0), c.get('y_mean',0.0)] for c in clouds_sel], dtype=float) if clouds_sel else _np.zeros((0,2))
+                    if centers.size:
+                        lbl = _np.zeros(ph.shape[0], dtype=int)
+                        for i in range(ph.shape[0]):
+                            dp = _np.minimum.reduce([_np.abs(ph[i]-centers[:,0]), _np.abs(ph[i]-centers[:,0]-180), _np.abs(ph[i]-centers[:,0]+180)])
+                            dy = _np.abs(amp[i]-centers[:,1])
+                            j = int(_np.argmin(0.6*dp + 0.4*dy)); lbl[i] = j
+                        for j in range(centers.shape[0]):
+                            m = (lbl==j)
+                            if _np.any(m): _ax.scatter(ph[m], amp[m], s=5, alpha=0.7, color=cols[j%len(cols)], label=f'C{j+1}')
+                        for j,c in enumerate(clouds_sel):
+                            _ax.scatter([c.get('phase_mean',0.0)], [c.get('y_mean',0.0)], s=60, color=cols[j%len(cols)], edgecolors='black')
+                    else:
+                        _ax.scatter(ph, amp, s=3, alpha=0.6, color='#1f77b4')
+                    _ax.set_xlim(0,360); _ax.set_xlabel('Fase (°)'); _ax.set_ylabel('Amplitud'); _ax.set_title('Nubes dominantes')
+                    fig.tight_layout(); fig.savefig(out_reports / f"{stem}_clouds.png", bbox_inches='tight'); fig.savefig(out_reports / f"{stem}_s5_nubes_dominantes.png", bbox_inches='tight'); _plt.close(fig)
+                    fig.tight_layout(); fig.savefig(out_reports / f"{stem}_clouds.png", bbox_inches='tight'); _plt.close(fig)
+            except Exception:
+                pass
+
+            # Baseline JSON (crear si no existe)
+            try:
+                base_path = out_reports / f"{stem}_baseline.json"
+                bd = result.get('severity_breakdown', {})
+                cur = {
+                    'p95_amp': float(bd.get('p95_amp', 0.0)),
+                    'dens': float(bd.get('dens', 0.0)),
+                    'R_phase': float(bd.get('R_phase', 0.0)),
+                    'std_circ_deg': float(bd.get('std_circ_deg', 0.0)),
+                    'severity': float(result.get('severity_score', 0.0)),
+                }
+                if not base_path.exists():
+                    base_path.write_text(json.dumps(cur, ensure_ascii=False, indent=2), encoding='utf-8')
+            except Exception:
+                pass
+
+            # Metrics CSV (+ new_severity)
+            try:
+                bd = result.get('severity_breakdown', {})
+                base_sev = float(result.get('severity_score', 0.0))
+                proba = result.get('probs', {})
+                p_target = float(proba.get('cavidad', 0.0))
+                ann_term = 100.0 * p_target
+                # band penalty/bonus usando baseline
+                band_penalty = 0.0
+                base_path = out_reports / f"{stem}_baseline.json"
+                if base_path.exists():
+                    base = json.loads(base_path.read_text(encoding='utf-8'))
+                    def out_of_band(cur, b):
+                        lo = 0.8*b; hi = 1.2*b
+                        return (cur < lo) or (cur > hi)
+                    if out_of_band(float(bd.get('p95_amp',0.0)), float(base.get('p95_amp',0.0))): band_penalty += 5.0
+                    if out_of_band(float(bd.get('dens',0.0)), float(base.get('dens',0.0))): band_penalty += 3.0
+                    if out_of_band(float(bd.get('R_phase',0.0)), float(base.get('R_phase',0.0))): band_penalty += 2.0
+                new_sev = max(0.0, min(100.0, 0.7*base_sev + 0.3*ann_term - band_penalty))
+                with open(out_reports / f"{stem}_metrics.csv", 'w', encoding='utf-8') as f:
+                    f.write('predicted,severity,new_severity,p95_amp,dens,R_phase,std_circ_deg,phase_offset,filter_level\n')
+                    f.write(f"{result.get('predicted','')},{base_sev:.2f},{new_sev:.2f},{float(bd.get('p95_amp',0.0)):.4f},{float(bd.get('dens',0.0)):.6f},{float(bd.get('R_phase',0.0)):.6f},{float(bd.get('std_circ_deg',0.0)):.2f},{int(result.get('phase_offset',0))},{filt_label}\n")
+            except Exception:
+                pass
+
+            # Tracking PNG (bandas ±20%)
+            try:
+                base_path = out_reports / f"{stem}_baseline.json"
+                if base_path.exists():
+                    import matplotlib.pyplot as _plt
+                    import numpy as _np
+                    base = json.loads(base_path.read_text(encoding='utf-8'))
+                    keys = ['p95_amp','dens','R_phase','std_circ_deg','severity']
+                    curv = [float(bd.get('p95_amp',0.0)), float(bd.get('dens',0.0)), float(bd.get('R_phase',0.0)), float(bd.get('std_circ_deg',0.0)), float(result.get('severity_score',0.0))]
+                    basev = [float(base.get('p95_amp',0.0)), float(base.get('dens',0.0)), float(base.get('R_phase',0.0)), float(base.get('std_circ_deg',0.0)), float(base.get('severity',0.0))]
+                    fig, ax = _plt.subplots(figsize=(6,3), dpi=120)
+                    x = _np.arange(len(keys))
+                    lo = [0.8*b for b in basev]; hi = [1.2*b for b in basev]
+                    for i in range(len(keys)):
+                        ax.fill_between([i-0.3,i+0.3], [lo[i],lo[i]], [hi[i],hi[i]], color='#cfe8ff', alpha=0.7)
+                    ax.plot(x, basev, 'o-', color='#1f77b4', label='base')
+                    ax.plot(x, curv, 'x-', color='#d62728', label='actual')
+                    ax.set_xticks(x, keys, rotation=20)
+                    ax.set_title('Tracking (±20% bandas)'); ax.grid(True, alpha=0.3)
+                    ax.legend(loc='upper left', fontsize=8)
+                    fig.tight_layout(); fig.savefig(out_reports / f"{stem}_tracking.png", bbox_inches='tight'); _plt.close(fig)
+            except Exception:
+                pass
+            # Extra: PRPD crudo/alineado y hist2D + 3D HTML (opcional)
+            try:
+                import numpy as _np, matplotlib.pyplot as _plt
+                # Crudo
+                raw = result.get("raw", {})
+                ph_r = _np.asarray(raw.get("phase_deg", []), dtype=float)
+                amp_r = _np.asarray(raw.get("amplitude", []), dtype=float)
+                if ph_r.size and amp_r.size:
+                    fig, ax = _plt.subplots(figsize=(5,4), dpi=120)
+                    ax.scatter(ph_r, amp_r, s=2, alpha=0.6)
+                    ax.set_xlim(0,360); ax.set_xlabel("Fase (°)"); ax.set_ylabel("Amplitud"); ax.set_title("PRPD crudo")
+                    fig.tight_layout(); fig.savefig(out_reports / f"{stem}_raw.png", bbox_inches="tight"); _plt.close(fig)
+                    try:
+                        H0, xe0, ye0 = _np.histogram2d(ph_r, amp_r, bins=(240,120), range=((0,360), (float(amp_r.min()), float(amp_r.max()))))
+                        fig, ax = _plt.subplots(figsize=(5,4), dpi=120)
+                        ax.imshow(H0.T, origin="lower", aspect="auto", extent=[xe0[0],xe0[-1],ye0[0],ye0[-1]], cmap="viridis")
+                        ax.set_xlim(0,360); ax.set_xlabel("Fase (°)"); ax.set_ylabel("Amplitud"); ax.set_title("PRPD crudo (hist2D)")
+                        fig.tight_layout(); fig.savefig(out_reports / f"{stem}_raw_hist2d.png", bbox_inches="tight"); _plt.close(fig)
+                    except Exception:
+                        pass
+                # Alineado
+                ali = result.get("aligned", {})
+                ph_a = _np.asarray(ali.get("phase_deg", []), dtype=float)
+                amp_a = _np.asarray(ali.get("amplitude", []), dtype=float)
+                if ph_a.size and amp_a.size:
+                    fig, ax = _plt.subplots(figsize=(5,4), dpi=120)
+                    ax.scatter(ph_a, amp_a, s=3, alpha=0.7, color="#1f77b4")
+                    ax.set_xlim(0,360); ax.set_xlabel("Fase (°)"); ax.set_ylabel("Amplitud"); ax.set_title("Alineado/filtrado")
+                    fig.tight_layout(); fig.savefig(out_reports / f"{stem}_aligned.png", bbox_inches="tight"); _plt.close(fig)
+                    # Hist2D
+                    H, xedges, yedges = _np.histogram2d(ph_a, amp_a, bins=(240,120), range=((0,360), (float(amp_a.min()), float(amp_a.max()))))
+                    fig, ax = _plt.subplots(figsize=(5,4), dpi=120)
+                    ax.imshow(H.T, origin="lower", aspect="auto", extent=[xedges[0],xedges[-1],yedges[0],yedges[-1]], cmap="viridis")
+                    ax.set_xlim(0,360); ax.set_xlabel("Fase (°)"); ax.set_ylabel("Amplitud"); ax.set_title("Histograma 2D (densidad)")
+                    fig.tight_layout(); fig.savefig(out_reports / f"{stem}_aligned_hist2d.png", bbox_inches="tight"); _plt.close(fig)
+                # Plotly HTML 3D (opcional)
+                try:
+                    import plotly.graph_objects as go
+                    z = _np.arange(ph_a.size, dtype=float) if ph_a.size else _np.array([])
+                    if ph_a.size and amp_a.size and z.size:
+                        fig3d = go.Figure(data=[go.Scatter3d(x=ph_a, y=amp_a, z=z, mode="markers", marker=dict(size=2, color=amp_a, colorscale="Viridis", opacity=0.8))])
+                        fig3d.update_layout(scene=dict(xaxis_title="Fase (°)", yaxis_title="Amplitud", zaxis_title="Orden"), title="PRPD 3D (Plotly)")
+                        fig3d.write_html(str(out_reports / f"{stem}_3d.html"), include_plotlyjs="cdn")
+                except Exception:
+                    pass
+                res_w = core.process_prpd(path=self.current_path, out_root=outdir, force_phase_offsets=force_offsets, fast_mode=False, filter_level="S1 Weak")
+                res_s = core.process_prpd(path=self.current_path, out_root=outdir, force_phase_offsets=force_offsets, fast_mode=False, filter_level="S2 Strong")
+                def _plot_s3(res, label, out_name):
+                    ph = _np.asarray(res.get("aligned", {}).get("phase_deg", []), dtype=float)
+                    amp = _np.asarray(res.get("aligned", {}).get("amplitude", []), dtype=float)
+                    if ph.size and amp.size:
+                        clouds = pixel_cluster_clouds(ph, amp)
+                        fig, ax = _plt.subplots(figsize=(5,4), dpi=120)
+                        ax.scatter(ph, amp, s=2, alpha=0.45, color="#999999")
+                        for c in clouds:
+                            ax.scatter([c.get("phase_mean",0.0)], [c.get("y_mean",0.0)], s=50, color="#1f77b4", edgecolors="black")
+                        ax.set_xlim(0,360); ax.set_xlabel("Fase (°)"); ax.set_ylabel("Amplitud"); ax.set_title(f"Nubes crudas (S3) - Filtro {label}")
+                        fig.tight_layout(); fig.savefig(out_reports / out_name, bbox_inches="tight"); _plt.close(fig)
+                        return clouds
+                    return []
+                clouds_w = _plot_s3(res_w, "débil", _Path(f"{stem}_s3_nubes_crudas_weak.png"))
+                clouds_s = _plot_s3(res_s, "fuerte", _Path(f"{stem}_s3_nubes_crudas_strong.png"))
+                # S4: nubes combinadas
+                all_clouds = list(clouds_w) + list(clouds_s)
+                try:
+                    comb = combine_clouds(all_clouds) if all_clouds else []
+                    ph_ref = _np.asarray(res_w.get("aligned", {}).get("phase_deg", []), dtype=float)
+                    amp_ref = _np.asarray(res_w.get("aligned", {}).get("amplitude", []), dtype=float)
+                    fig, ax = _plt.subplots(figsize=(5,4), dpi=120)
+                    if ph_ref.size and amp_ref.size: ax.scatter(ph_ref, amp_ref, s=2, alpha=0.45, color="#999999")
+                    for c in comb:
+                        ax.scatter([c.get("phase_mean",0.0)], [c.get("y_mean",0.0)], s=60, color="#ff7f0e", edgecolors="black")
+                    ax.set_xlim(0,360); ax.set_xlabel("Fase (°)"); ax.set_ylabel("Amplitud"); ax.set_title("Nubes combinadas (S4)")
+                    fig.tight_layout(); fig.savefig(out_reports / f"{stem}_s4_nubes_combinadas.png", bbox_inches="tight"); _plt.close(fig)
+                except Exception:
+                    pass
+                # S5: nubes dominantes a partir de combinadas
+                try:
+                    sel = select_dominant_clouds(all_clouds) if all_clouds else []
+                    fig, ax = _plt.subplots(figsize=(5,4), dpi=120)
+                    if ph_ref.size and amp_ref.size: ax.scatter(ph_ref, amp_ref, s=2, alpha=0.45, color="#999999")
+                    cols = ["#1f77b4","#ff7f0e","#2ca02c","#d62728","#9467bd","#8c564b"]
+                    for j,c in enumerate(sel):
+                        ax.scatter([c.get("phase_mean",0.0)], [c.get("y_mean",0.0)], s=60, color=cols[j%len(cols)], edgecolors="black")
+                    ax.set_xlim(0,360); ax.set_xlabel("Fase (°)"); ax.set_ylabel("Amplitud"); ax.set_title("Nubes dominantes (S5)")
+                    fig.tight_layout(); fig.savefig(out_reports / f"{stem}_s5_nubes_dominantes.png", bbox_inches="tight"); _plt.close(fig)
+                except Exception:
+                    pass
+            except Exception:
+                pass
+
+            # Render final
+            self.render_result(result)
+            self.btn_pdf.setEnabled(True)
+
+
+def on_btnLoadANN_clicked(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(self, 'Seleccionar modelo ANN', '', 'Modelos (*.pkl *.joblib)')
+        if not path:
+            return
+        ok = False
+        if _load_ann_model is not None:
+            try:
+                self.ann_model, self.ann_classes = _load_ann_model(path)
+                ok = True
+            except Exception:
+                ok = False
+        if (not ok) and hasattr(self, 'ann'):
+            try:
+                self.ann.load_model(path)
+                ok = True
+            except Exception:
+                ok = False
+        if ok:
+            QMessageBox.information(self, 'ANN', f'Modelo cargado.\n{path}')
+            if self.last_result:
+                self.render_result(self.last_result)
+        else:
+            QMessageBox.warning(self, 'ANN', f'No se pudo cargar el modelo\n{path}')
+
+def on_export_all_clicked(self) -> None:
+        """Exporta S3/S4/S5 y histogramas para los tres filtros (weak/strong/stronger)
+        y ANGPD con columnas qty al CSV."""
+        if not self.current_path:
+            QMessageBox.information(self, "Exportar", "Primero carga y procesa un archivo.")
+            return
+        try:
+            outdir = ensure_out_dirs(Path("out"))
+            stem = self.current_path.stem
+            force_offsets = None if (self.auto_phase or self.cmb_phase.currentIndex() == 0) else [int([0,0,120,240][self.cmb_phase.currentIndex()])]
+            import matplotlib.pyplot as _plt, numpy as _np
+            from PRPDapp.clouds import pixel_cluster_clouds, combine_clouds, select_dominant_clouds
+            filters = [("weak","S1 Weak"), ("strong","S2 Strong"), ("stronger","S2 Stronger")]
+            res = {}
+            for suf, flabel in filters:
+                res[suf] = core.process_prpd(path=self.current_path, out_root=outdir, force_phase_offsets=force_offsets, fast_mode=False, filter_level=flabel)
+
+
+                # ANGPD CSV con qty
+                ang = res[suf].get('angpd', {})
+                x  = _np.asarray(ang.get('phi_centers', []), dtype=float)
+                y1 = _np.asarray(ang.get('angpd', []), dtype=float)
+                y2 = _np.asarray(ang.get('n_angpd', []), dtype=float)
+                y3 = _np.asarray(ang.get('angpd_qty', []), dtype=float)
+                y4 = _np.asarray(ang.get('n_angpd_qty', []), dtype=float)
+                if x.size:
+                    with open(Path(outdir)/'reports'/f"{stem}_angpd_{suf}.csv", 'w', encoding='utf-8') as f:
+                        f.write('phi_deg,angpd,n_angpd,angpd_qty,n_angpd_qty\n')
+                        for i in range(x.size):
+                            f.write(f"{float(x[i]):.3f},{float(y1[i]) if i<y1.size else 0:.6f},{float(y2[i]) if i<y2.size else 0:.6f},{float(y3[i]) if i<y3.size else 0:.6f},{float(y4[i]) if i<y4.size else 0:.6f}\n")
+                # S3
+                ph = _np.asarray(res[suf].get('aligned', {}).get('phase_deg', []), dtype=float)
+                amp = _np.asarray(res[suf].get('aligned', {}).get('amplitude', []), dtype=float)
+                clouds = pixel_cluster_clouds(ph, amp) if (ph.size and amp.size) else []
+                fig, ax = _plt.subplots(figsize=(5,4), dpi=120)
+                if ph.size and amp.size: ax.scatter(ph, amp, s=2, alpha=0.45, color="#999999")
+                for c in clouds: ax.scatter([c.get('phase_mean',0.0)], [c.get('y_mean',0.0)], s=50, color="#1f77b4", edgecolors="black")
+                ax.set_xlim(0,360); ax.set_xlabel('Fase (°)'); ax.set_ylabel('Amplitud'); ax.set_title(f'Nubes crudas (S3) - {suf}')
+                fig.tight_layout(); fig.savefig(Path(outdir)/'reports'/f"{stem}_s3_{suf}.png", bbox_inches='tight'); _plt.close(fig)
+                # S4/S5
+                comb = combine_clouds(clouds) if clouds else []
+                fig, ax = _plt.subplots(figsize=(5,4), dpi=120)
+                if ph.size and amp.size: ax.scatter(ph, amp, s=2, alpha=0.45, color="#999999")
+                for c in comb: ax.scatter([c.get('phase_mean',0.0)],[c.get('y_mean',0.0)], s=60, color="#ff7f0e", edgecolors="black")
+                ax.set_xlim(0,360); ax.set_xlabel('Fase (°)'); ax.set_ylabel('Amplitud'); ax.set_title(f'Nubes combinadas (S4) - {suf}')
+                fig.tight_layout(); fig.savefig(Path(outdir)/'reports'/f"{stem}_s4_{suf}.png", bbox_inches='tight'); _plt.close(fig)
+                sel = select_dominant_clouds(clouds) if clouds else []
+                fig, ax = _plt.subplots(figsize=(5,4), dpi=120)
+                if ph.size and amp.size: ax.scatter(ph, amp, s=2, alpha=0.45, color="#999999")
+                cols=["#1f77b4","#ff7f0e","#2ca02c","#d62728","#9467bd","#8c564b"]
+                for j,c in enumerate(sel): ax.scatter([c.get('phase_mean',0.0)], [c.get('y_mean',0.0)], s=60, color=cols[j%len(cols)], edgecolors="black")
+                ax.set_xlim(0,360); ax.set_xlabel('Fase (°)'); ax.set_ylabel('Amplitud'); ax.set_title(f'Nubes dominantes (S5) - {suf}')
+                fig.tight_layout(); fig.savefig(Path(outdir)/'reports'/f"{stem}_s5_{suf}.png", bbox_inches='tight'); _plt.close(fig)
+                # Histogramas fase/amp (PNG)
+                if ph.size and amp.size:
+                    N=16; phi=ph%360.0; pos=(phi<180.0); neg=~pos; xi=_np.arange(1,N+1)
+                    # amp
+                    a_pos,_=_np.histogram(amp[pos], bins=N, range=(0.0,100.0)); a_neg,_=_np.histogram(amp[neg], bins=N, range=(0.0,100.0))
+                    Ha_pos=_np.log10(1.0+a_pos.astype(float)); Ha_neg=_np.log10(1.0+a_neg.astype(float)); m=float(max(Ha_pos.max() if Ha_pos.size else 0, Ha_neg.max() if Ha_neg.size else 0,1.0)); Ha_pos/=m; Ha_neg/=m
+                    fig,ax=_plt.subplots(figsize=(5,3), dpi=120); ax.plot(xi,Ha_pos,'-o',label='H_amp+'); ax.plot(xi,Ha_neg,'-o',label='H_amp-'); ax.set_xlabel('Indice (N=16)'); ax.set_ylabel('H_amp (norm)'); ax.set_title(f'Histograma Amplitud ({suf})'); ax.legend(); fig.tight_layout(); fig.savefig(Path(outdir)/'reports'/f"{stem}_hist_amp_{suf}.png", bbox_inches='tight'); _plt.close(fig)
+                    # phase
+                    phi_pos=phi[pos]; phi_neg=(phi[neg]-180.0); p_pos,_=_np.histogram(phi_pos,bins=N,range=(0.0,180.0)); p_neg,_=_np.histogram(phi_neg,bins=N,range=(0.0,180.0))
+                    Hp_pos=_np.log10(1.0+p_pos.astype(float)); Hp_neg=_np.log10(1.0+p_neg.astype(float)); m=float(max(Hp_pos.max() if Hp_pos.size else 0, Hp_neg.max() if Hp_neg.size else 0,1.0)); Hp_pos/=m; Hp_neg/=m
+                    fig,ax=_plt.subplots(figsize=(5,3), dpi=120); ax.plot(xi,Hp_pos,'-o',label='H_ph+'); ax.plot(xi,Hp_neg,'-o',label='H_ph-'); ax.set_xlabel('Indice (N=16)'); ax.set_ylabel('H_ph (norm)'); ax.set_title(f'Histograma Fase ({suf})'); ax.legend(); fig.tight_layout(); fig.savefig(Path(outdir)/'reports'/f"{stem}_hist_phase_{suf}.png", bbox_inches='tight'); _plt.close(fig)
+            QMessageBox.information(self,'Exportar','Exportes completos generados en out/reports')
+        except Exception as e:
+            traceback.print_exc(); QMessageBox.warning(self,'Exportar', f'Error en exportación total:\n{e}')
+
+def on_btn3D_clicked(self) -> None:
+        if getattr(self, "current_points", None) is None or getattr(self, "current_labels", None) is None:
+            QMessageBox.information(self, "3D", "No hay datos cargados.")
+            return
+        try:
+            plot_prpd_3d(self.current_points, self.current_labels, title="PRPD 3D")
+        except Exception as e:
+            QMessageBox.warning(self, "3D", f"No se pudo mostrar 3D:\n{e}")
+
+def on_btnBatch_clicked(self) -> None:
+        root = QFileDialog.getExistingDirectory(self, "Selecciona raíz (p.ej. EntrenamientoPatron)")
+        if not root:
+            return
+        try:
+            text, out_dir = self._run_folder_batch(Path(root))
+            self.txtBatchSummary.setPlainText(text)
+            QMessageBox.information(self, "Batch", f"Salida:\n{out_dir}")
+        except Exception as e:
+            traceback.print_exc()
+            QMessageBox.warning(self, "Batch", f"Error procesando carpeta:\n{e}")
+
+def _run_folder_batch(self, root_dir: Path):
+        from utils_io import ensure_out_dirs, time_tag, write_json
+        root_dir = Path(root_dir)
+        xmls = list(root_dir.rglob('*.xml'))
+        if not xmls:
+            raise RuntimeError("No se encontraron .xml en la carpeta seleccionada.")
+        out_dir = Path('out') / 'batch' / f"{root_dir.name}_{time_tag()}"
+        ensure_out_dirs(out_dir)
+        lines = [f"Carpeta: {root_dir}", f"Total XML: {len(xmls)}", ""]
+        summary = []
+        fast_mode = False
+        filt_label = self.cmb_filter.currentText().strip() if hasattr(self, 'cmb_filter') else 'S1 Weak'
+        for i, xp in enumerate(xmls, 1):
+            try:
+                res = core.process_prpd(path=Path(xp), out_root=out_dir, force_phase_offsets=None, fast_mode=fast_mode, filter_level=filt_label)
+                line = f"[{i:03d}/{len(xmls):03d}] {xp.name} -> {res.get('predicted','?')} | sev={res.get('severity_score',0):.1f} | clusters={res.get('n_clusters',0)} | ruido={'Sí' if res.get('has_noise') else 'No'}"
+                lines.append(line)
+                summary.append({
+                    'file': str(xp),
+                    'predicted': res.get('predicted'),
+                    'severity': res.get('severity_score'),
+                    'n_clusters': res.get('n_clusters'),
+                    'has_noise': res.get('has_noise'),
+                    'phase_offset': res.get('phase_offset'),
+                })
+            except Exception as e:
+                lines.append(f"[{i:03d}/{len(xmls):03d}] {xp.name} -> ERROR: {e}")
+                summary.append({'file': str(xp), 'error': str(e)})
+        text = "\n".join(lines)
+        write_json(out_dir / 'batch_summary.json', {'root': str(root_dir), 'results': summary})
+        (out_dir / 'batch_summary.txt').write_text(text, encoding='utf-8')
+        return text, str(out_dir)
+
+
+def main() -> None:
+    app = QApplication(sys.argv)
+    w = PRPDWindow()
+    w.show()
+    sys.exit(app.exec())
+
+
+
+
+# --- CLI opcional: followup ---
+def _cli_followup(argv=None):
+    try:
+        import sys as _sys, pathlib as _pl
+        _pkg_dir = _pl.Path(__file__).resolve().parent  # PRPDapp
+        _parent = _pkg_dir.parent
+        if str(_parent) not in _sys.path:
+            _sys.path.insert(0, str(_parent))
+        from PRPDapp.tools.run_followup import main as _run
+        _run(argv)
+    except Exception as e:
+        print('[followup] Error:', e)
+
+if __name__ == "__main__":
+    import sys
+    if len(sys.argv) > 1 and sys.argv[1].lower() == "followup":
+        _cli_followup(sys.argv[2:])
+    else:
+        main()
+
+
+
+
+
+
+
+

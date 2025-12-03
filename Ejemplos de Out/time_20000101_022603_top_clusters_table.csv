@@ -1,7 +1,0 @@
-cluster_id,top_tipo,top_prob,size_pct,stability_hdb,frac_ruido_hdb
-K0,superficial,0.21097,3.35,0.424,0.000
-K1,flotante,0.20226,40.23,0.889,0.000
-K2,superficial,0.27023,38.51,0.878,0.000
-K3,superficial,0.27105,17.91,0.913,0.000
-H0,cavidad,0.73252,96.74,0.888,0.000
-H1,superficial,0.21025,3.26,0.434,0.000

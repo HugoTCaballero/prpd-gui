@@ -1,0 +1,365 @@
+def _render_conclusions(self, result: dict, payload: dict | None = None) -> None:
+        if payload is None:
+            text, payload = self._get_conclusion_insight(result)
+            self.last_conclusion_text = text
+            self.last_conclusion_payload = payload
+        else:
+            text = self.last_conclusion_text
+        summary = payload.get("summary", {}) if isinstance(payload, dict) else {}
+        metrics = payload.get("metrics", {}) if isinstance(payload, dict) else {}
+        manual = self.manual_override if getattr(self, "manual_override", {}).get("enabled") else None
+        gap_stats = payload.get("gap") if isinstance(payload, dict) else None
+        self.ax_gap_wide.set_visible(False)
+        for ax_top in (self.ax_raw, self.ax_filtered):
+            ax_top.clear()
+            ax_top.set_facecolor("#fafafa")
+            ax_top.set_xticks([])
+            ax_top.set_yticks([])
+            ax_top.axis("off")
+
+        self._clear_conclusion_artists()
+        ax = self._ensure_conclusion_axis()
+        ax.set_visible(True)
+        ax.clear()
+        # Ocupa toda el área disponible para evitar espacios en blanco grandes
+        try:
+            ax.set_position([0.0, 0.0, 1.0, 1.0])
+        except Exception:
+            pass
+        ax.set_xlim(0, 1)
+        ax.set_ylim(0, 1)
+        ax.axis("off")
+        ax.set_facecolor("#ffffff")
+        card = FancyBboxPatch(
+            (0.01, 0.02),
+            0.98,
+            0.96,
+            boxstyle="round,pad=0.02",
+            linewidth=1.2,
+            facecolor="#fffdf5",
+            edgecolor="#c8c6c3",
+        )
+        self._register_conclusion_artist(ax.add_patch(card))
+        palette = {
+            "critico": "#B00000",
+            "crítico": "#B00000",
+            "alta": "#B00000",
+            "alto": "#B00000",
+            "grave": "#FF8C00",
+            "moderado": "#1565c0",
+            "leve": "#1565c0",
+            "bajo": "#00B050",
+            "aceptable": "#00B050",
+            "incipiente": "#00B050",
+            "descargas parciales no detectadas": "#00B050",
+            "alerta": "#FF8C00",
+            "info": "#0d47a1",
+            "mitigado": "#00B050",
+        }
+        self._draw_conclusion_header(ax, "Resultados de los principales KPI", None)
+
+        left_card = FancyBboxPatch(
+            (0.02, 0.15),
+            0.47,
+            0.74,
+            boxstyle="round,pad=0.02",
+            linewidth=1.0,
+            facecolor="#ffffff",
+            edgecolor="#d9d4c7",
+        )
+        right_card = FancyBboxPatch(
+            (0.51, 0.15),
+            0.47,
+            0.74,
+            boxstyle="round,pad=0.02",
+            linewidth=1.0,
+            facecolor="#ffffff",
+            edgecolor="#d9d4c7",
+        )
+        self._register_conclusion_artist(ax.add_patch(left_card))
+        self._register_conclusion_artist(ax.add_patch(right_card))
+
+        left_ax = ax.inset_axes([0.03, 0.18, 0.44, 0.66])
+        right_ax = ax.inset_axes([0.52, 0.18, 0.44, 0.66])
+        for sub in (left_ax, right_ax):
+            sub.set_axis_off()
+            sub.set_xlim(0, 1)
+            sub.set_ylim(0, 1)
+            sub.set_facecolor("none")
+        self._conclusion_subaxes.extend([left_ax, right_ax])
+
+        def _fmt_value(value, decimals=1, suffix=""):
+            if value is None:
+                return "N/D"
+            try:
+                if isinstance(value, (int, np.integer)):
+                    return f"{int(value):,}{suffix}"
+                return f"{float(value):.{decimals}f}{suffix}"
+            except Exception:
+                return f"{value}"
+
+        def _fmt_angle(value):
+            if value is None or value == "N/D":
+                return "N/D"
+            try:
+                return f"{float(value):.1f}°"
+            except Exception:
+                return f"{value}°"
+
+        def _status_or_default(status):
+            # Normaliza a tupla (texto, color) incluso si viene None o str
+            if isinstance(status, tuple) and len(status) == 2:
+                return status
+            if isinstance(status, str):
+                return (status, palette.get(status.lower(), "#00B050"))
+            return ("", "#ffffff")
+
+        def _gap_badge_tuple(value, classification, *, default="Aceptable"):
+            """Elige etiqueta/color para gap-time usando clasificación o fallback interno."""
+            if classification:
+                label = classification.get("level_name") or classification.get("label") or "Gap-time"
+                color = classification.get("color", "#00B050")
+                return (label, color)
+            label, color = self._status_from_gap(value)
+            if label == "Sin gap time":
+                return (default, "#00B050")
+            return (label, color)
+
+        gap_info = (gap_stats or {}).get("classification") if isinstance(gap_stats, dict) else None
+        class_p5 = (gap_stats or {}).get("classification_p5") if isinstance(gap_stats, dict) else None
+        gap_p50 = metrics.get("gap_p50")
+        gap_p5 = metrics.get("gap_p5")
+
+        def _pct_diff(val_a, val_b, min_scale=1.0):
+            try:
+                a = float(val_a)
+                b = float(val_b)
+            except Exception:
+                return 100.0
+            denom = max((abs(a) + abs(b)) * 0.5, min_scale)
+            return abs(a - b) / denom * 100.0
+
+        symmetry_hits = sum(
+            1 for diff in (
+                _pct_diff(metrics.get("count_pos"), metrics.get("count_neg"), 1.0),
+                _pct_diff(metrics.get("phase_width_pos"), metrics.get("phase_width_neg"), 1.0),
+                _pct_diff(metrics.get("amp_p95_pos"), metrics.get("amp_p95_neg"), 1.0),
+            )
+            if diff <= 4.0
+        )
+        symmetric_pd = symmetry_hits >= 2 and int(metrics.get("n_peaks") or 0) <= 2 and max(int(metrics.get("n_peaks_pos") or 0), int(metrics.get("n_peaks_neg") or 0)) <= 1
+        triplets = [
+            ("Total pulsos utiles",
+             _fmt_value(metrics.get("total_count"), decimals=0),
+             _fmt_value(metrics.get("count_pos"), decimals=0),
+             _fmt_value(metrics.get("count_neg"), decimals=0),
+             self._status_from_total(metrics.get("total_count")),
+             False,
+             0.26),
+            ("Anchura fase",
+             _fmt_angle(metrics.get("phase_width")),
+             _fmt_angle(metrics.get("phase_width_pos")),
+             _fmt_angle(metrics.get("phase_width_neg")),
+             self._status_from_width(metrics.get("phase_width")),
+             False,
+             0.26),
+            ("Centro",
+             _fmt_angle(metrics.get("phase_center")),
+             _fmt_angle(metrics.get("phase_center_pos")),
+             _fmt_angle(metrics.get("phase_center_neg")),
+             None,
+             False,
+             0.26),
+            ("Numero de picos de fase",
+             _fmt_value(metrics.get("n_peaks"), decimals=0),
+             _fmt_value(metrics.get("n_peaks_pos"), decimals=0),
+             _fmt_value(metrics.get("n_peaks_neg"), decimals=0),
+             None,
+             False,
+             0.26),
+            ("P95 amplitud",
+             _fmt_value(metrics.get("p95_mean")),
+             _fmt_value(metrics.get("amp_p95_pos")),
+             _fmt_value(metrics.get("amp_p95_neg")),
+             self._status_from_amp(metrics.get("p95_mean")),
+             False,
+             0.26),
+        ]
+
+        def _draw_triplet_row(ax_target, y_val, label, total_val, pos_val, neg_val, badge, show_badge, badge_x):
+            label_fmt = (label[:1].upper() + label[1:]) if label else "N/D"
+            self._register_conclusion_artist(ax_target.text(0.02, y_val, label_fmt, fontsize=12, fontweight="bold", ha="left", va="center", color="#0f172a"))
+            self._register_conclusion_artist(ax_target.text(0.38, y_val, total_val, fontsize=12, ha="left", va="center", color="#111827"))
+            self._register_conclusion_artist(ax_target.text(0.60, y_val, pos_val, fontsize=11.5, ha="left", va="center", color="#0d47a1"))
+            self._register_conclusion_artist(ax_target.text(0.80, y_val, neg_val, fontsize=11.5, ha="left", va="center", color="#b23c17"))
+            if badge and show_badge:
+                text_badge, color_badge = badge
+                self._register_conclusion_artist(self._draw_status_tag(ax_target, text_badge, badge_x, y_val, color=color_badge))
+
+        y = self._draw_section_title(left_ax, "Indicadores clave", y=0.98)
+        header_y = y + 0.05
+        self._register_conclusion_artist(left_ax.text(0.38, header_y, "TOTAL", fontsize=10, fontweight="bold", color="#1f2933"))
+        self._register_conclusion_artist(left_ax.text(0.60, header_y, "SEMICICLO +", fontsize=10, fontweight="bold", color="#0d47a1"))
+        self._register_conclusion_artist(left_ax.text(0.80, header_y, "SEMICICLO -", fontsize=10, fontweight="bold", color="#b23c17"))
+        self._register_conclusion_artist(left_ax.plot([0.02, 0.95], [header_y - 0.02, header_y - 0.02], color="#e0e0e0", linewidth=1.0)[0])
+        y -= 0.025
+        for entry in triplets:
+            label, total_val, pos_val, neg_val, status = entry[:5]
+            show_badge = entry[5] if len(entry) > 5 else False
+            badge_x = entry[6] if len(entry) > 6 else 0.26
+            _draw_triplet_row(left_ax, y, label, total_val, pos_val, neg_val, _status_or_default(status), show_badge, badge_x)
+            self._register_conclusion_artist(left_ax.plot([0.02, 0.95], [y - 0.025, y - 0.025], color="#f0f0f0", linewidth=0.8)[0])
+            y -= 0.07
+
+        y -= 0.02
+        # Gap P50 y P5
+        _draw_triplet_row(left_ax, y, "Gap-Time P50", _fmt_value(gap_p50, decimals=2, suffix=" ms"), "-", "-", _status_or_default(_gap_badge_tuple(gap_p50, gap_info)), True, 0.58)
+        y -= 0.075
+        _draw_triplet_row(left_ax, y, "Gap-Time P5", _fmt_value(gap_p5, decimals=2, suffix=" ms"), "-", "-", _status_or_default(_gap_badge_tuple(gap_p5, class_p5, default="Sin dato")), True, 0.58)
+        y -= 0.075
+        # Relación N-ANGPD: solo superficial/tracking; >1 grave, >3 crítico
+        badge_rel = None
+        # Usar pd_type efectivo (ajustado con ANN si aplica) para decidir
+        pd_type_effective = summary.get("pd_type", "") if isinstance(summary.get("pd_type"), str) else ""
+        ann_probs_badge = self._last_ann_probs or {}
+        if ann_probs_badge:
+            try:
+                ann_norm = {str(k).lower(): float(v) for k, v in ann_probs_badge.items() if v is not None}
+                dom_key = max(ann_norm, key=ann_norm.get)
+                if dom_key.startswith("cavidad"):
+                    pd_type_effective = "Cavidad interna"
+                elif dom_key.startswith("super"):
+                    pd_type_effective = "Superficial / Tracking"
+                elif dom_key.startswith("corona"):
+                    pd_type_effective = "Corona"
+            except Exception:
+                pass
+        pd_type_lower = pd_type_effective.lower()
+        if "superficial" in pd_type_lower or "tracking" in pd_type_lower:
+            try:
+                rel_val = float(metrics.get("n_ang_ratio"))
+            except Exception:
+                rel_val = None
+            if rel_val is not None:
+                if rel_val > 3.0:
+                    badge_rel = ("Crítico", "#B00000")
+                elif rel_val > 1.0:
+                    badge_rel = ("Grave", "#FF8C00")
+                else:
+                    badge_rel = ("Estable", "#1565c0")
+        _draw_triplet_row(left_ax, y, "Relacion N-ANGPD/ANGPD", f"{metrics.get('n_ang_ratio', 'N/D')}", "-", "-", badge_rel if badge_rel else ("", "#ffffff"), badge_rel is not None, 0.58)
+        y -= 0.075
+
+        def _wrap_action_text(text_value: str) -> list[str]:
+            parts = []
+            for raw in text_value.split("."):
+                chunk = raw.strip()
+                if not chunk:
+                    continue
+                # Corta frases largas en dos renglones
+                if len(chunk) > 60:
+                    mid = chunk[:60].rfind(" ")
+                    if mid > 20:
+                        parts.append(chunk[:mid].strip())
+                        parts.append(chunk[mid:].strip())
+                    else:
+                        parts.append(chunk)
+                else:
+                    parts.append(chunk)
+            return parts or ["Sin acciones registradas"]
+
+        def _render_action_badges(ax_target, y_start, label, text_value, color):
+            ax_target.text(0.02, y_start, label, fontsize=11, fontweight="bold", ha="left", va="center")
+            y_pos = y_start - 0.07
+            for part in _wrap_action_text(text_value):
+                self._draw_status_tag(ax_target, part, 0.32, y_pos, color=color, text_color="#ffffff")
+                y_pos -= 0.07
+            return y_pos + 0.01
+
+        def _draw_right_row(ax_target, y_val, label, value, *, color="#0d47a1", text_color="#ffffff"):
+            pretty = value if value and value != "N/D" else "N/D"
+            if isinstance(pretty, str):
+                pretty = pretty.strip()
+                if pretty:
+                    pretty = pretty[0].upper() + pretty[1:]
+                else:
+                    pretty = "N/D"
+            self._register_conclusion_artist(ax_target.text(0.02, y_val, label.upper(), fontsize=10, fontweight="bold", ha="left", va="center"))
+            self._register_conclusion_artist(self._draw_status_tag(ax_target, pretty, 0.42, y_val, color=color, text_color=text_color))
+            return y_val - 0.08
+
+        # Contenido tarjeta derecha
+        header_y = self._draw_section_title(right_ax, "Seguimiento y criticidad", y=0.96)
+
+        risk_label = summary.get("risk", "N/D")
+        risk_key = risk_label.lower() if isinstance(risk_label, str) else ""
+        estado_map = {
+            "bajo": ("Aceptable", "#00B050"),
+            "moderado": ("Moderado", "#1565c0"),
+            "alto": ("Grave", "#FF8C00"),
+            "grave": ("Grave", "#FF8C00"),
+            "critico": ("Crítico", "#B00000"),
+            "crítico": ("Crítico", "#B00000"),
+            "incipiente": ("Incipiente", "#00B050"),
+            "descargas parciales no detectadas": ("Sin descargas", "#00B050"),
+            "sin descargas": ("Sin descargas", "#00B050"),
+        }
+        estado_general, risk_color = estado_map.get(risk_key, (risk_label if isinstance(risk_label, str) else "N/D", palette.get(risk_key, "#00B050")))
+        life_years = summary.get("life_years")
+        life_score = summary.get("life_score")
+
+        y = header_y - 0.03
+        life_txt = f"{life_score:.1f}" if isinstance(life_score, (int, float)) else "N/A"
+        vida_txt = "N/A"
+        if isinstance(life_years, (int, float)):
+            vida_txt = f"≈ {life_years:.1f} años"
+        if manual:
+            estado_general = manual.get("header_risk") or estado_general
+            life_txt = manual.get("header_score") or life_txt
+            vida_txt = manual.get("header_life") or vida_txt
+            risk_color = manual.get("header_color", risk_color)
+        summary_badge = f"{estado_general}   |   LifeScore: {life_txt}   |   Vida remanente: {vida_txt}"
+        self._draw_status_tag(right_ax, summary_badge, 0.02, y, color=risk_color, text_color="#ffffff", size=12)
+        y -= 0.14
+        action_general = manual.get("action_reco") if manual else None
+        if not action_general:
+            action_general = summary.get("actions", "Sin acciones registradas.")
+        action_color = manual.get("action_reco_color", "#0d47a1") if manual else "#0d47a1"
+        y = _render_action_badges(right_ax, y, "ACCIÓN RECOMENDADA", action_general, action_color) - 0.04
+
+        if gap_info:
+            gap_text = manual.get("action_gap") if manual else None
+            gap_color = manual.get("action_gap_color", gap_info.get("color", "#00B050")) if manual else gap_info.get("color", "#00B050")
+            if not gap_text:
+                gap_text = gap_info.get("action", "")
+            y = _render_action_badges(right_ax, y, "ACCIÓN GAP-TIME P50", gap_text, gap_color) - 0.08
+
+        stage = manual.get("stage") if manual else None
+        pd_type = manual.get("mode") if manual else None
+        location = manual.get("location") if manual else None
+        risk_manual_text = manual.get("risk") if manual else None
+        stage = stage or summary.get("stage", "N/D")
+        pd_type = pd_type or summary.get("pd_type", "N/D")
+        location = self._normalize_location_label(location or summary.get("location", "N/D"))
+        # Ajustar pd_type/location con ANN dominante si existe
+        ann_probs = self._last_ann_probs or {}
+        if ann_probs:
+            try:
+                ann_norm = {str(k).lower(): float(v) for k, v in ann_probs.items() if v is not None}
+                dom_key = max(ann_norm, key=ann_norm.get)
+                if dom_key.startswith("cavidad"):
+                    pd_type = "Cavidad interna"; location = "Volumen interno del aislamiento"
+                elif dom_key.startswith("super"):
+                    pd_type = "Superficial / Tracking"; location = "Superficie de aislamiento e interfaces"
+                elif dom_key.startswith("corona"):
+                    pd_type = "Corona"; location = "Puntos vivos expuestos al aire"
+            except Exception:
+                pass
+        if isinstance(stage, str) and stage.lower().startswith("evoluc"):
+            stage = "Avanzada"
+        y = _draw_right_row(right_ax, y, "ETAPA PROBABLE", stage, color=manual.get("stage_color", "#1e88e5") if manual else "#1e88e5")
+        y = _draw_right_row(right_ax, y, "MODO DOMINANTE", pd_type, color=manual.get("mode_color", "#1e88e5") if manual else "#1e88e5")
+        y = _draw_right_row(right_ax, y, "UBICACIÓN PROBABLE", location, color=manual.get("location_color", "#1e88e5") if manual else "#1e88e5")
+        y = _draw_right_row(right_ax, y, "RIESGO", risk_manual_text or risk_label, color=manual.get("risk_color", risk_color) if manual else risk_color)
+
+    
