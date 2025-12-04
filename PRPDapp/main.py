@@ -3915,6 +3915,8 @@ class PRPDWindow(QMainWindow):
                     self._save_conclusions_png(payload, session_dir, stem, suffix)
                 except Exception:
                     traceback.print_exc()
+        except NameError as ne:
+            traceback.print_exc()
         except Exception:
             traceback.print_exc()
 
