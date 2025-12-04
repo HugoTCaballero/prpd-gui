@@ -1029,9 +1029,8 @@ def process_prpd(path: Path, out_root: Path, force_phase_offsets=None, fast_mode
         ang_proj_kpis = {}
 
     # Consolidar KPIs en un solo bloque para GUI/export
-    kpi_block = result.get("kpis", {}) if isinstance(result, dict) else {}
-    if not isinstance(kpi_block, dict):
-        kpi_block = {}
+    # Consolidar KPIs en un solo bloque para GUI/export
+    kpi_block: dict = {}
     # Copiar/façade de FA profile
     if isinstance(fa_kpis, dict):
         kpi_block.setdefault("fa_phase_width_deg", fa_kpis.get("phase_width_deg"))
