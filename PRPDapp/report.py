@@ -46,19 +46,41 @@ def export_pdf_report(result: dict, out_root: Path) -> Path:
         _page_title(fig, "PRPD – Informe rápido", subtitle)
         pdf.savefig(fig); fig.clear()
 
-        # resumen
+        # resumen (usa rule_pd si está disponible)
+        rule = result.get("rule_pd", {}) if isinstance(result, dict) else {}
         items = [
-            ("Clase predicha", result["predicted"]),
-            ("Severidad (0–100)", f"{result['severity_score']:.1f}"),
-            ("Fase (offset)", f"{result['phase_offset']}°"),
-            ("Vector de fase R", f"{result['phase_vector_R']:.3f}"),
-            ("Ruido detectado", "Sí" if result["has_noise"] else "No"),
-            ("Clusters conservados", f"{result['n_clusters']}"),
-            ("Puntos crudos", f"{len(result['raw']['phase_deg'])}"),
-            ("Puntos filtrados", f"{len(result['aligned']['phase_deg'])}"),
+            ("Modo dominante", rule.get("class_label") or result.get("predicted", "N/D")),
+            ("Etapa", rule.get("stage", "N/D")),
+            ("Riesgo", rule.get("risk_level", "N/D")),
+            ("Ubicación probable", rule.get("location_hint", "N/D")),
+            ("Ruleset", rule.get("ruleset_version", "N/D")),
+            ("Severidad (0–100)", f"{result.get('severity_score', 0):.1f}"),
+            ("Fase (offset)", f"{result.get('phase_offset', 0)}°"),
+            ("Vector de fase R", f"{result.get('phase_vector_R', 0):.3f}"),
+            ("Ruido detectado", "Sí" if result.get("has_noise") else "No"),
+            ("Clusters conservados", f"{result.get('n_clusters', 0)}"),
+            ("Puntos crudos", f"{len(result.get('raw', {}).get('phase_deg', []))}"),
+            ("Puntos filtrados", f"{len(result.get('aligned', {}).get('phase_deg', []))}"),
         ]
         fig = Figure(figsize=(8.27, 11.69), dpi=120)
         _page_table(fig, "Resumen del procesamiento", items)
+        pdf.savefig(fig); fig.clear()
+
+        # KPIs consolidados
+        kpis = result.get("kpis", {}) if isinstance(result, dict) else {}
+        kpi_items = [
+            ("FA: anchura fase (°)", kpis.get("fa_phase_width_deg", "N/D")),
+            ("FA: simetría", kpis.get("fa_symmetry_index", "N/D")),
+            ("FA: conc. amplitud", kpis.get("fa_concentration_index", "N/D")),
+            ("FA: P95 amplitud", kpis.get("fa_p95_amplitude", "N/D")),
+            ("N-ANGPD/ANGPD", kpis.get("n_angpd_angpd_ratio", "N/D")),
+            ("Gap-time P50 (ms)", kpis.get("gap_p50_ms", "N/D")),
+            ("Gap-time P5 (ms)", kpis.get("gap_p5_ms", "N/D")),
+            ("ANGPD2: picos fase", kpis.get("ang_phase_peaks", "N/D")),
+            ("ANGPD2: conc. amplitud", kpis.get("ang_amp_concentration", "N/D")),
+        ]
+        fig = Figure(figsize=(8.27, 11.69), dpi=120)
+        _page_table(fig, "KPIs consolidados", kpi_items)
         pdf.savefig(fig); fig.clear()
 
         # figuras
@@ -71,8 +93,9 @@ def export_pdf_report(result: dict, out_root: Path) -> Path:
                  f"Alineado/filtrado (offset={result['phase_offset']}°)")
 
         ax3 = fig.add_subplot(gs[1,0])
-        classes = list(CLASS_NAMES)
-        probs = [result["probs"].get(k,0.0) for k in classes]
+        rule_probs = rule.get("class_probs", {}) if isinstance(rule, dict) else {}
+        classes = list(rule_probs.keys()) or list(CLASS_NAMES)
+        probs = [rule_probs.get(k, 0.0) for k in classes] if rule_probs else [result.get("probs", {}).get(k,0.0) for k in classes]
         colors = [CLASS_INFO.get(k,{}).get("color", "#888888") for k in classes]
         labels = [CLASS_INFO.get(k,{}).get("name", k) for k in classes]
         ax3.bar(labels, probs, color=colors)
@@ -81,24 +104,21 @@ def export_pdf_report(result: dict, out_root: Path) -> Path:
 
         ax4 = fig.add_subplot(gs[1,1])
         ax4.axis("off")
-        f = result["features"]
-        lines = [
-            "Características:",
-            f"• p95 |amplitud|   : {f['p95_amp']:.3f}",
-            f"• densidad guardada: {f['dens']:.3f}",
-            f"• concentración fase R: {f['R_phase']:.3f}",
-            f"• balance de polaridad: {f['polarity_balance']:.3f}",
-            "",
-            "Meta:",
-            "Este reporte es un MVP (ANN heurística + severidad compuesta).",
+        rule_lines = [
+            "Clasificador por reglas",
+            f"Modo dominante: {rule.get('class_label', 'N/D')}",
+            f"Etapa: {rule.get('stage', 'N/D')}",
+            f"Riesgo: {rule.get('risk_level', 'N/D')}",
+            f"Ubicación: {rule.get('location_hint', 'N/D')}",
+            f"Ruleset: {rule.get('ruleset_version', 'N/D')}",
         ]
-        ax4.text(0.02, 0.98, "\n".join(lines), va="top", fontsize=10)
+        ax4.text(0.02, 0.98, "\n".join(rule_lines), va="top", fontsize=10)
         pdf.savefig(fig); fig.clear()
 
         # metadatos JSON embebidos
         d = pdf.infodict()
         d['Title'] = f"PRPD Report – {run_id}"
-        d['Author'] = "PRPD-GUI MVP"
+        d['Author'] = "PRPD-GUI"
         d['Subject'] = "Clasificación y filtros PRPD"
         d['Keywords'] = "PRPD, clustering, fase, ANN, severidad"
     return pdf_path
