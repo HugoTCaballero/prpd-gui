@@ -109,6 +109,7 @@ def render_conclusions(wnd, result: dict, payload: dict | None = None) -> None:
         text = wnd.last_conclusion_text
 
     summary = payload.get("summary", {}) if isinstance(payload, dict) else {}
+    rule_pd = result.get("rule_pd", {}) if isinstance(result, dict) else {}
     metrics = payload.get("metrics", {}) if isinstance(payload, dict) else {}
     metrics_adv = payload.get("metrics_advanced", {}) if isinstance(payload, dict) else {}
     if not metrics_adv:
@@ -436,7 +437,49 @@ def render_conclusions(wnd, result: dict, payload: dict | None = None) -> None:
         return y_val - 0.08
 
     header_y = wnd._draw_section_title(right_ax, "Seguimiento y criticidad", y=0.96)
-    risk_label = summary.get("risk", "N/D")
+    # Modo dominante / ubicación / etapa / severidad / riesgo / lifetime desde rule_pd
+    dom_pd = rule_pd.get("class_label") or rule_pd.get("dominant_pd") or summary.get("pd_type") or "N/D"
+    location = rule_pd.get("location_hint", "N/D")
+    stage = rule_pd.get("stage", "N/D")
+    sev_level = rule_pd.get("severity_level", "N/D")
+    sev_idx = rule_pd.get("severity_index")
+    risk_label = rule_pd.get("risk_level", summary.get("risk", "N/D"))
+    lifetime_score = rule_pd.get("lifetime_score")
+    lifetime_band = rule_pd.get("lifetime_band")
+    lifetime_text = rule_pd.get("lifetime_text")
+    actions = rule_pd.get("actions") or []
+
+    # Bloque de encabezado en right card
+    hdr_y = wnd._draw_section_title(right_ax, "Diagnóstico", y=0.96)
+    right_ax.text(0.02, hdr_y - 0.04, f"Modo dominante: {dom_pd}", fontsize=11, fontweight="bold", ha="left")
+    right_ax.text(0.02, hdr_y - 0.10, f"Ubicación probable: {location}", fontsize=10, ha="left")
+    right_ax.text(0.02, hdr_y - 0.16, f"Etapa: {stage}", fontsize=10, ha="left")
+    if sev_idx is not None:
+        right_ax.text(0.02, hdr_y - 0.22, f"Severidad: {sev_level} (Índice {sev_idx:.1f}/10)", fontsize=10, ha="left")
+    else:
+        right_ax.text(0.02, hdr_y - 0.22, f"Severidad: {sev_level}", fontsize=10, ha="left")
+    hdr_y = hdr_y - 0.26
+
+    # Resumen LifeTime
+    if lifetime_score is not None:
+        lt_line = f"LifeTime score: {lifetime_score}/100"
+        if lifetime_band:
+            lt_line += f" ({lifetime_band})"
+        wnd._draw_status_tag(right_ax, lt_line, 0.02, hdr_y, color="#0d47a1", text_color="#ffffff")
+        hdr_y -= 0.10
+        if lifetime_text:
+            wnd._register_conclusion_artist(right_ax.text(0.02, hdr_y, lifetime_text, fontsize=9, ha="left", wrap=True))
+            hdr_y -= 0.12
+
+    # Acciones recomendadas
+    if actions:
+        hdr_y = wnd._draw_section_title(right_ax, "Acciones recomendadas", y=hdr_y - 0.02)
+        y_act = hdr_y - 0.04
+        for act in actions[:4]:
+            right_ax.text(0.03, y_act, f"• {act}", fontsize=9, ha="left")
+            y_act -= 0.06
+        hdr_y = y_act - 0.02
+
     risk_key = risk_label.lower() if isinstance(risk_label, str) else ""
     estado_map = {
         "bajo": ("Aceptable", "#00B050"),
@@ -450,15 +493,11 @@ def render_conclusions(wnd, result: dict, payload: dict | None = None) -> None:
         "sin descargas": ("Sin descargas", "#00B050"),
     }
     estado_general, risk_color = estado_map.get(risk_key, (risk_label if isinstance(risk_label, str) else "N/D", palette.get(risk_key, "#00B050")))
-    life_years = summary.get("life_years")
-    life_score = summary.get("life_score")
+    # LifeScore desde rule_pd
+    life_score = lifetime_score
     y_right = header_y - 0.03
-    life_txt = f"{life_score:.1f}" if isinstance(life_score, (int, float)) else "N/A"
-    vida_txt = "N/A"
-    if summary.get("life_interval"):
-        vida_txt = summary.get("life_interval")
-    elif isinstance(life_years, (int, float)):
-        vida_txt = f"{life_years:.1f} años"
+    life_txt = f"{life_score:.1f}" if isinstance(life_score, (int, float)) else "N/D"
+    vida_txt = lifetime_band or "N/D"
     if manual:
         estado_general = manual.get("header_risk") or estado_general
         life_txt = manual.get("header_score") or life_txt
@@ -468,11 +507,24 @@ def render_conclusions(wnd, result: dict, payload: dict | None = None) -> None:
     wnd._draw_status_tag(right_ax, summary_badge, 0.02, y_right, color=risk_color, text_color="#ffffff", size=12)
     y_right -= 0.14
 
+    # Acción general / explicación adicional
     action_general = manual.get("action_reco") if manual else None
     if not action_general:
-        action_general = summary.get("actions", "Sin acciones registradas.")
+        if actions:
+            action_general = "; ".join(str(a) for a in actions[:3])
+        else:
+            action_general = "Sin acciones registradas."
     action_color = manual.get("action_reco_color", "#0d47a1") if manual else "#0d47a1"
     y_right = _render_action_badges(right_ax, y_right, "ACCIÓN RECOMENDADA", action_general, action_color) - 0.04
+
+    # Bloque de explicación breve
+    if explanation:
+        y_right = wnd._draw_section_title(right_ax, "Explicación", y=y_right)
+        y_txt = y_right - 0.04
+        for line in explanation[:4]:
+            right_ax.text(0.03, y_txt, f"• {line}", fontsize=9, ha="left")
+            y_txt -= 0.06
+        y_right = y_txt - 0.02
 
     # Indicadores avanzados (skew/kurt/corr/medianas)
     y_right = wnd._draw_section_title(right_ax, "Indicadores avanzados", y=y_right - 0.02)
