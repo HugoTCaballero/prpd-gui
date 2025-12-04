@@ -69,9 +69,7 @@ def main():
             continue
 
         rule = result.get("rule_pd", {}) or {}
-        fa = result.get("fa_kpis", {}) or {}
-        kpi = result.get("kpi", {}) or {}
-        gap = result.get("gap_stats", {}) or result.get("gap_summary", {}) or {}
+        kpis = result.get("kpis", {}) or {}
 
         row = {
             "file": fname,
@@ -79,13 +77,15 @@ def main():
             "true_stage": meta.get("true_stage"),
             "pred_class": rule.get("class_id"),
             "pred_stage": rule.get("stage"),
-            "fa_phase_width": fa.get("phase_width_deg"),
-            "fa_symmetry": fa.get("symmetry_index"),
-            "fa_concentration": fa.get("ang_amp_concentration_index"),
-            "fa_p95_amp": fa.get("p95_amplitude"),
-            "n_angpd_angpd_ratio": kpi.get("n_ang_ratio") if isinstance(kpi, dict) else None,
-            "gap_p50_ms": gap.get("p50_ms") or gap.get("P50_ms"),
-            "gap_p5_ms": gap.get("p5_ms") or gap.get("P5_ms"),
+            "fa_phase_width": kpis.get("fa_phase_width_deg"),
+            "fa_symmetry": kpis.get("fa_symmetry_index"),
+            "fa_concentration": kpis.get("fa_concentration_index"),
+            "fa_p95_amp": kpis.get("fa_p95_amplitude"),
+            "n_angpd_angpd_ratio": kpis.get("n_angpd_angpd_ratio"),
+            "gap_p50_ms": kpis.get("gap_p50_ms"),
+            "gap_p5_ms": kpis.get("gap_p5_ms"),
+            "ang_phase_peaks": kpis.get("ang_phase_peaks"),
+            "ang_amp_concentration": kpis.get("ang_amp_concentration"),
         }
         rows.append(row)
 

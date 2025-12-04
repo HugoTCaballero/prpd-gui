@@ -3,6 +3,7 @@ from __future__ import annotations
 import numpy as np
 
 from PRPDapp.pd_rules_config import (
+    RULESET_VERSION,
     TH_FA_WIDTH_CAVIDAD_MAX,
     TH_SYM_CAVIDAD_MIN,
     TH_CORR_CAVIDAD_MIN,
@@ -224,6 +225,8 @@ def infer_pd_summary(features: dict, probs: dict) -> dict:
         "class_id": class_id,
         "class_label": class_label,
         "class_probs": probs,
+        "classes": list(probs.keys()),
+        "ruleset_version": RULESET_VERSION,
         "stage": stage,
         "risk_level": risk,
         "location_hint": location,

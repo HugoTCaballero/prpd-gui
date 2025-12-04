@@ -1,4 +1,5 @@
 # Umbrales ajustables para el clasificador por reglas (FA profile + KPIs)
+RULESET_VERSION = "2025-03-12"
 
 # --- Cavidad interna ---
 TH_FA_WIDTH_CAVIDAD_MAX = 90.0       # grados
