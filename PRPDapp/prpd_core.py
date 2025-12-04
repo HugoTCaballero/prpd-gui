@@ -1041,20 +1041,8 @@ def process_prpd(path: Path, out_root: Path, force_phase_offsets=None, fast_mode
         kpi_block.setdefault("fa_n_pulses_total", fa_kpis.get("total_pulses"))
         kpi_block.setdefault("fa_n_pulses_pos", fa_kpis.get("pulses_pos"))
         kpi_block.setdefault("fa_n_pulses_neg", fa_kpis.get("pulses_neg"))
-    # ANGPD clásico ratio (si existe en kpi/metrics previos)
-    try:
-        if "n_angpd_angpd_ratio" not in kpi_block:
-            if isinstance(result.get("kpi"), dict) and "n_ang_ratio" in result["kpi"]:
-                kpi_block["n_angpd_angpd_ratio"] = result["kpi"]["n_ang_ratio"]
-            elif isinstance(result.get("metrics"), dict) and "n_ang_ratio" in result["metrics"]:
-                kpi_block["n_angpd_angpd_ratio"] = result["metrics"]["n_ang_ratio"]
-    except Exception:
-        pass
-    # Gap-time (si gap_stats disponible)
-    gap_stats = result.get("gap_stats") or result.get("gap_summary") or {}
-    if isinstance(gap_stats, dict):
-        kpi_block.setdefault("gap_p50_ms", gap_stats.get("p50_ms") or gap_stats.get("P50_ms"))
-        kpi_block.setdefault("gap_p5_ms", gap_stats.get("p5_ms") or gap_stats.get("P5_ms"))
+    # Gap-time placeholder; se completará si hay datos más adelante
+    gap_stats = {}
     # ANGPD avanzado
     if isinstance(ang_proj_kpis, dict):
         kpi_block.setdefault("ang_phase_width_deg", ang_proj_kpis.get("phase_width_deg"))
