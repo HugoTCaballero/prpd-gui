@@ -3834,8 +3834,83 @@ class PRPDWindow(QMainWindow):
             txt_path = session_dir / f"{stem}_conclusiones_{suffix}.txt"
             txt_path.write_text(text, encoding="utf-8")
             if payload:
+                # Enriquecer payload con rule_pd y KPIs consolidados
+                enriched = dict(payload)
+                rule_pd = result.get("rule_pd", {}) if isinstance(result, dict) else {}
+                kpis = result.get("kpis", {}) if isinstance(result, dict) else {}
+                fa_kpis = result.get("fa_kpis", {}) if isinstance(result, dict) else {}
+                gap_kpis = result.get("gap_kpis", {}) or result.get("gap_stats", {}) if isinstance(result, dict) else {}
+                angpd_kpis = result.get("angpd_kpis", {}) if isinstance(result, dict) else {}
+                enriched["rule_pd"] = {
+                    "class_id": rule_pd.get("class_id"),
+                    "class_label": rule_pd.get("class_label"),
+                    "class_probs": rule_pd.get("class_probs", {}),
+                    "location_hint": rule_pd.get("location_hint"),
+                    "stage": rule_pd.get("stage"),
+                    "severity_level": rule_pd.get("severity_level"),
+                    "severity_index": rule_pd.get("severity_index"),
+                    "risk_level": rule_pd.get("risk_level"),
+                    "lifetime_score": rule_pd.get("lifetime_score"),
+                    "lifetime_band": rule_pd.get("lifetime_band"),
+                    "lifetime_text": rule_pd.get("lifetime_text"),
+                    "actions": rule_pd.get("actions", []),
+                    "explanation": rule_pd.get("explanation", []),
+                    "ruleset_version": rule_pd.get("ruleset_version"),
+                }
+                enriched["kpis"] = {
+                    "table": kpis,
+                    "fa": fa_kpis,
+                    "gap_time": gap_kpis,
+                    "angpd": angpd_kpis,
+                }
                 json_path = session_dir / f"{stem}_conclusiones_{suffix}.json"
-                json_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+                json_path.write_text(json.dumps(enriched, ensure_ascii=False, indent=2), encoding="utf-8")
+                # Markdown sencillo con conclusiones
+                def _map_stage(stage: str) -> str:
+                    mapping = {
+                        "incipiente": "Etapa incipiente",
+                        "en_desarrollo": "Etapa en desarrollo",
+                        "avanzada": "Etapa avanzada",
+                    }
+                    return mapping.get(stage, stage or "No evaluada")
+                md_lines = []
+                md_lines.append("## Conclusiones de la evaluación de DP\n")
+                md_lines.append("### Modo dominante y ubicación probable")
+                md_lines.append(f"- **Modo dominante:** {rule_pd.get('class_label','No disponible')}")
+                md_lines.append(f"- **Ubicación probable:** {rule_pd.get('location_hint','No determinada')}\n")
+                md_lines.append("### Condición actual del aislamiento")
+                md_lines.append(f"- **Etapa probable:** {_map_stage(rule_pd.get('stage'))}")
+                sev_lvl = rule_pd.get("severity_level") or "No definida"
+                sev_idx = rule_pd.get("severity_index")
+                if isinstance(sev_idx, (int, float)):
+                    md_lines.append(f"- **Severidad:** {sev_lvl} (índice {sev_idx:.1f} / 10)")
+                else:
+                    md_lines.append(f"- **Severidad:** {sev_lvl}")
+                md_lines.append(f"- **Riesgo global:** {rule_pd.get('risk_level','No definido')}\n")
+                md_lines.append("### Vida remanente estimada")
+                lt_score = rule_pd.get("lifetime_score")
+                lt_band = rule_pd.get("lifetime_band") or ""
+                lt_text = rule_pd.get("lifetime_text") or ""
+                if lt_score is not None:
+                    md_lines.append(f"- **LifeTime score:** {lt_score}/100 {f'({lt_band})' if lt_band else ''}")
+                else:
+                    md_lines.append("- **LifeTime score:** No disponible")
+                if lt_text:
+                    md_lines.append(f"\n{lt_text}\n")
+                md_lines.append("### Acciones recomendadas")
+                acts = rule_pd.get("actions") or []
+                if acts:
+                    for act in acts:
+                        md_lines.append(f"- {act}")
+                else:
+                    md_lines.append("- No disponible")
+                exp = rule_pd.get("explanation") or []
+                if exp:
+                    md_lines.append("\n### Resumen de la lógica aplicada")
+                    for e in exp:
+                        md_lines.append(f"- {e}")
+                md_path = session_dir / f"{stem}_conclusiones_{suffix}.md"
+                md_path.write_text("\n".join(md_lines), encoding="utf-8")
                 try:
                     self._save_conclusions_png(payload, session_dir, stem, suffix)
                 except Exception:
