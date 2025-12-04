@@ -601,26 +601,7 @@ class PRPDWindow(QMainWindow):
             count_norm = count
 
         ax.clear()
-        # Intentar colorear por quintiles si existen en aligned
-        quint_idx = None
-        try:
-            quint_idx = np.asarray(result.get("aligned", {}).get("qty_quintiles", []), dtype=float)
-        except Exception:
-            quint_idx = None
-        color_map = {
-            1: "#0066CC",
-            2: "#009900",
-            3: "#FFCC00",
-            4: "#FF8000",
-            5: "#CC0000",
-        }
-        if quint_idx is not None and quint_idx.size and quint_idx.size == phase.size:
-            for q in range(1, 6):
-                mask = quint_idx == q
-                if mask.any():
-                    ax.scatter(phase[mask], max_amp_plot[mask], s=26, alpha=0.7, color=color_map.get(q, "#888888"), edgecolors="none", label=f"Q{q}")
-        else:
-            ax.plot(phase, max_amp_plot, marker="o", linestyle="none", alpha=0.4, label="Max amp por bin")
+        ax.plot(phase, max_amp_plot, marker="o", linestyle="none", alpha=0.4, label="Max amp por bin")
         if max_smooth.size:
             ax.plot(phase, max_smooth, linestyle="-", linewidth=2.0, label="Envolvente suavizada")
         ax.set_xlabel("Fase (°)")
@@ -722,24 +703,8 @@ class PRPDWindow(QMainWindow):
         # PRPD alineado (izquierda)
         ph_al = np.asarray(aligned.get("phase_deg", []), dtype=float)
         amp_al = np.asarray(aligned.get("amplitude", []), dtype=float)
-        quint_idx = None
-        try:
-            quint_idx = np.asarray(aligned.get("qty_quintiles", []), dtype=float)
-        except Exception:
-            quint_idx = None
         if ph_al.size and amp_al.size:
-            if quint_idx is not None and quint_idx.size == ph_al.size:
-                quint_colors = {1: "#0066CC", 2: "#009900", 3: "#FFCC00", 4: "#FF8000", 5: "#CC0000"}
-                for q in range(1, 6):
-                    mask = quint_idx == q
-                    if mask.any():
-                        self.ax_raw.scatter(ph_al[mask], amp_al[mask], s=5, alpha=0.5, color=quint_colors.get(q, "#999999"), edgecolors="none", label=f"Q{q}")
-                try:
-                    self.ax_raw.legend(loc="upper right", fontsize=8)
-                except Exception:
-                    pass
-            else:
-                self._draw_prpd_scatter_base(self.ax_raw, r)
+            self._draw_prpd_scatter_base(self.ax_raw, r)
             self.ax_raw.set_xlim(0, 360)
             self._apply_auto_ylim(self.ax_raw, amp_al)
         else:
