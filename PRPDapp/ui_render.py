@@ -399,7 +399,8 @@ def render_conclusions(wnd, result: dict, payload: dict | None = None) -> None:
         ("P95 amplitud (FA)", _fmt_fa(kpis.get("fa_p95_amplitude") or fa_kpis.get("p95_amplitude"))),
     ]
     for label, val in fa_rows:
-        y_left = _draw_triplet_row(left_ax, y_left, label, val, "-", "-", ("", "#ffffff"), spacing=0.20)
+        _draw_triplet_row(left_ax, y_left, label, val, "-", "-", ("", "#ffffff"), False, 0.26)
+        y_left -= 0.10
     y_left -= 0.04
 
     def _wrap_action_text(text_value: str) -> list[str]:
