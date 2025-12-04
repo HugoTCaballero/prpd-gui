@@ -91,6 +91,7 @@ import xml.etree.ElementTree as ET
 import math
 from PRPDapp.pd_rules import build_rule_features, rule_based_scores, infer_pd_summary
 from PRPDapp.ang_proj import compute_ang_proj, compute_ang_proj_kpis
+from PRPDapp.ann_features import build_ann_feature_vector
 
 
 def debug_dump_result_keys(result):
@@ -1027,6 +1028,42 @@ def process_prpd(path: Path, out_root: Path, force_phase_offsets=None, fast_mode
         ang_proj = {}
         ang_proj_kpis = {}
 
+    # Consolidar KPIs en un solo bloque para GUI/export
+    kpi_block = result.get("kpis", {}) if isinstance(result, dict) else {}
+    if not isinstance(kpi_block, dict):
+        kpi_block = {}
+    # Copiar/façade de FA profile
+    if isinstance(fa_kpis, dict):
+        kpi_block.setdefault("fa_phase_width_deg", fa_kpis.get("phase_width_deg"))
+        kpi_block.setdefault("fa_phase_center_deg", fa_kpis.get("phase_center_deg"))
+        kpi_block.setdefault("fa_symmetry_index", fa_kpis.get("symmetry_index"))
+        kpi_block.setdefault("fa_concentration_index", fa_kpis.get("ang_amp_concentration_index"))
+        kpi_block.setdefault("fa_p95_amplitude", fa_kpis.get("p95_amplitude"))
+        kpi_block.setdefault("fa_n_pulses_total", fa_kpis.get("total_pulses"))
+        kpi_block.setdefault("fa_n_pulses_pos", fa_kpis.get("pulses_pos"))
+        kpi_block.setdefault("fa_n_pulses_neg", fa_kpis.get("pulses_neg"))
+    # ANGPD clásico ratio (si existe en kpi/metrics previos)
+    try:
+        if "n_angpd_angpd_ratio" not in kpi_block:
+            if isinstance(result.get("kpi"), dict) and "n_ang_ratio" in result["kpi"]:
+                kpi_block["n_angpd_angpd_ratio"] = result["kpi"]["n_ang_ratio"]
+            elif isinstance(result.get("metrics"), dict) and "n_ang_ratio" in result["metrics"]:
+                kpi_block["n_angpd_angpd_ratio"] = result["metrics"]["n_ang_ratio"]
+    except Exception:
+        pass
+    # Gap-time (si gap_stats disponible)
+    gap_stats = result.get("gap_stats") or result.get("gap_summary") or {}
+    if isinstance(gap_stats, dict):
+        kpi_block.setdefault("gap_p50_ms", gap_stats.get("p50_ms") or gap_stats.get("P50_ms"))
+        kpi_block.setdefault("gap_p5_ms", gap_stats.get("p5_ms") or gap_stats.get("P5_ms"))
+    # ANGPD avanzado
+    if isinstance(ang_proj_kpis, dict):
+        kpi_block.setdefault("ang_phase_width_deg", ang_proj_kpis.get("phase_width_deg"))
+        kpi_block.setdefault("ang_phase_symmetry", ang_proj_kpis.get("phase_symmetry"))
+        kpi_block.setdefault("ang_phase_peaks", ang_proj_kpis.get("phase_peaks"))
+        kpi_block.setdefault("ang_amp_concentration", ang_proj_kpis.get("amp_concentration"))
+        kpi_block.setdefault("ang_amp_peaks", ang_proj_kpis.get("amp_peaks"))
+
     # Clasificador basado en reglas (usa KPIs ya calculados)
     rule_summary = None
     try:
@@ -1079,6 +1116,7 @@ def process_prpd(path: Path, out_root: Path, force_phase_offsets=None, fast_mode
         "ang_proj_kpis": ang_proj_kpis,
         "fa_profile": fa_profile,
         "fa_kpis": fa_kpis,
+        "kpis": kpi_block,
         "rule_pd": rule_summary,
         "s5_min_frac": s5_min_frac,
         "s3_eps": s3_eps,
@@ -1090,6 +1128,7 @@ def process_prpd(path: Path, out_root: Path, force_phase_offsets=None, fast_mode
         "pixel_deciles_meta": pixel_meta,
         "qty_deciles_meta": qty_dec_meta,
         "qty_quintiles_meta": qty_quint_meta,
+        "ann_features": build_ann_feature_vector({"kpis": kpi_block}),
     }
 
 

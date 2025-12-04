@@ -113,6 +113,7 @@ def render_conclusions(wnd, result: dict, payload: dict | None = None) -> None:
     metrics_adv = payload.get("metrics_advanced", {}) if isinstance(payload, dict) else {}
     if not metrics_adv:
         metrics_adv = result.get("metrics_advanced", {})
+    kpis = result.get("kpis", {}) if isinstance(result, dict) else {}
     fa_kpis = result.get("fa_kpis", {}) if isinstance(result, dict) else {}
     fa_kpis = result.get("fa_kpis", {}) if isinstance(result, dict) else {}
     manual = wnd.manual_override if getattr(wnd, "manual_override", {}).get("enabled") else None
@@ -214,8 +215,8 @@ def render_conclusions(wnd, result: dict, payload: dict | None = None) -> None:
 
     gap_info = (gap_stats or {}).get("classification") if isinstance(gap_stats, dict) else None
     class_p5 = (gap_stats or {}).get("classification_p5") if isinstance(gap_stats, dict) else None
-    gap_p50 = metrics.get("gap_p50")
-    gap_p5 = metrics.get("gap_p5")
+    gap_p50 = kpis.get("gap_p50_ms", metrics.get("gap_p50"))
+    gap_p5 = kpis.get("gap_p5_ms", metrics.get("gap_p5"))
 
     # Métricas avanzadas (skew/kurt/correlación/medianas, etc.)
     m_adv = metrics_adv or {}
@@ -356,11 +357,15 @@ def render_conclusions(wnd, result: dict, payload: dict | None = None) -> None:
         except Exception:
             pass
     pd_type_lower = pd_type_effective.lower()
+    rel_val_raw = kpis.get("n_angpd_angpd_ratio") if kpis else None
+    if rel_val_raw is None:
+        rel_val_raw = metrics.get("n_ang_ratio")
+    rel_val = None
+    try:
+        rel_val = float(rel_val_raw)
+    except Exception:
+        rel_val = None
     if "superficial" in pd_type_lower or "tracking" in pd_type_lower:
-        try:
-            rel_val = float(metrics.get("n_ang_ratio"))
-        except Exception:
-            rel_val = None
         if rel_val is not None:
             if rel_val > 3.0:
                 badge_rel = ("Crítico", "#B00000")
@@ -368,7 +373,8 @@ def render_conclusions(wnd, result: dict, payload: dict | None = None) -> None:
                 badge_rel = ("Grave", "#FF8C00")
             else:
                 badge_rel = ("Estable", "#1565c0")
-    _draw_triplet_row(left_ax, y_left, "Relacion N-ANGPD/ANGPD", f"{metrics.get('n_ang_ratio', 'N/D')}", "-", "-", badge_rel if badge_rel else ("", "#ffffff"), badge_rel is not None, 0.58)
+    rel_txt = f"{rel_val:.2f}" if rel_val is not None else "N/D"
+    _draw_triplet_row(left_ax, y_left, "Relacion N-ANGPD/ANGPD", rel_txt, "-", "-", badge_rel if badge_rel else ("", "#ffffff"), badge_rel is not None, 0.58)
     y_left -= 0.075
 
     # KPIs FA profile
@@ -385,11 +391,11 @@ def render_conclusions(wnd, result: dict, payload: dict | None = None) -> None:
             return "N/D"
 
     fa_rows = [
-        ("Simetrfa semicírculos", _fmt_fa(fa_kpis.get("symmetry_index"))),
-        ("Centro de fase (°)", _fmt_fa(fa_kpis.get("phase_center_deg"))),
-        ("Anchura fase (°)", _fmt_fa(fa_kpis.get("phase_width_deg"))),
-        ("Índice concentración FA", _fmt_fa(fa_kpis.get("ang_amp_concentration_index"))),
-        ("P95 amplitud (FA)", _fmt_fa(fa_kpis.get("p95_amplitude"))),
+        ("Simetría semicírculos", _fmt_fa(kpis.get("fa_symmetry_index") or fa_kpis.get("symmetry_index"))),
+        ("Centro de fase (°)", _fmt_fa(kpis.get("fa_phase_center_deg") or fa_kpis.get("phase_center_deg"))),
+        ("Anchura fase (°)", _fmt_fa(kpis.get("fa_phase_width_deg") or fa_kpis.get("phase_width_deg"))),
+        ("Índice concentración FA", _fmt_fa(kpis.get("fa_concentration_index") or fa_kpis.get("ang_amp_concentration_index"))),
+        ("P95 amplitud (FA)", _fmt_fa(kpis.get("fa_p95_amplitude") or fa_kpis.get("p95_amplitude"))),
     ]
     for label, val in fa_rows:
         y_left = _draw_triplet_row(left_ax, y_left, label, val, "-", "-", ("", "#ffffff"), spacing=0.20)
