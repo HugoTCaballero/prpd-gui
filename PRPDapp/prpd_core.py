@@ -90,6 +90,7 @@ from sklearn.cluster import DBSCAN, KMeans
 import xml.etree.ElementTree as ET
 import math
 from PRPDapp.pd_rules import build_rule_features, rule_based_scores, infer_pd_summary
+from PRPDapp.ang_proj import compute_ang_proj, compute_ang_proj_kpis
 
 
 def debug_dump_result_keys(result):
@@ -1017,6 +1018,15 @@ def process_prpd(path: Path, out_root: Path, force_phase_offsets=None, fast_mode
         fa_profile = None
         fa_kpis = None
 
+    # ANGPD avanzado (proyecciones fase/amplitud)
+    try:
+        ang_proj = compute_ang_proj(aligned, n_phase_bins=32, n_amp_bins=16, n_points=64)
+        ang_proj_kpis = compute_ang_proj_kpis(ang_proj)
+    except Exception as e:
+        print("[WARN] Error computing ang_proj:", e)
+        ang_proj = {}
+        ang_proj_kpis = {}
+
     # Clasificador basado en reglas (usa KPIs ya calculados)
     rule_summary = None
     try:
@@ -1065,6 +1075,8 @@ def process_prpd(path: Path, out_root: Path, force_phase_offsets=None, fast_mode
         "severity_score": sev,
         "severity_breakdown": sev_bd,
         "angpd": angpd,
+        "ang_proj": ang_proj,
+        "ang_proj_kpis": ang_proj_kpis,
         "fa_profile": fa_profile,
         "fa_kpis": fa_kpis,
         "rule_pd": rule_summary,

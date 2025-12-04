@@ -144,6 +144,7 @@ def build_bottom_area(wnd):
         "Gap-time",
         "Gap-time extenso",
         "Histogramas",
+        "ANGPD avanzado",
         "KPI avanzados",
         "FA profile",
         "Combinada",

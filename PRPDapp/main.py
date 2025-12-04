@@ -654,6 +654,92 @@ class PRPDWindow(QMainWindow):
         self._draw_fa_profile_left(self.ax_raw, r)
         self._draw_fa_profile_right(self.ax_filtered, r, ph_al, amp_al)
 
+    # --- Vista ANGPD avanzado (proyecciones suavizadas) ---------------------
+    def _draw_angpd_advanced(self, r: dict) -> None:
+        """Vista con proyecciones fase/amplitud (ANGPD 2.0) sin tocar el ANGPD clásico."""
+        self._restore_standard_axes()
+        for ax in (self.ax_raw, self.ax_filtered, self.ax_probs):
+            ax.set_visible(True)
+            ax.set_axis_on()
+            ax.clear()
+        self.ax_text.set_visible(True)
+        self.ax_text.set_axis_on()
+        self.ax_text.clear()
+
+        ang_proj = r.get("ang_proj") if isinstance(r, dict) else None
+        kpis = r.get("ang_proj_kpis") if isinstance(r, dict) else {}
+        aligned = r.get("aligned", {}) if isinstance(r, dict) else {}
+        if not ang_proj:
+            for ax in (self.ax_raw, self.ax_filtered, self.ax_probs, self.ax_text):
+                ax.text(0.5, 0.5, "ANGPD avanzado no disponible", ha="center", va="center")
+                ax.set_axis_off()
+            return
+
+        n_points = int(ang_proj.get("n_points", 64))
+        phase_x = np.linspace(0.0, 360.0, n_points)
+        amp_min = float(ang_proj.get("amp_min", 0.0))
+        amp_max = float(ang_proj.get("amp_max", 1.0))
+        amp_x = np.linspace(amp_min, amp_max, n_points)
+
+        phase_pos = np.asarray(ang_proj.get("phase_pos", []), dtype=float)
+        phase_neg = np.asarray(ang_proj.get("phase_neg", []), dtype=float)
+        amp_pos = np.asarray(ang_proj.get("amp_pos", []), dtype=float)
+        amp_neg = np.asarray(ang_proj.get("amp_neg", []), dtype=float)
+
+        # PRPD alineado (izquierda)
+        ph_al = np.asarray(aligned.get("phase_deg", []), dtype=float)
+        amp_al = np.asarray(aligned.get("amplitude", []), dtype=float)
+        if ph_al.size and amp_al.size:
+            self._draw_prpd_scatter_base(self.ax_raw, r)
+            self.ax_raw.set_xlim(0, 360)
+            self._apply_auto_ylim(self.ax_raw, amp_al)
+        else:
+            self.ax_raw.text(0.5, 0.5, "Sin PRPD alineado", ha="center", va="center")
+            self.ax_raw.set_axis_off()
+        self.ax_raw.set_title("PRPD alineado")
+        self.ax_raw.set_xlabel("Fase (°)")
+        self.ax_raw.set_ylabel("Amplitud")
+
+        # Proyección de fase (derecha arriba)
+        self.ax_filtered.plot(phase_x, phase_pos, label="P_ph+ (norm)", color="#1f77b4")
+        self.ax_filtered.plot(phase_x, phase_neg, label="P_ph- (norm)", color="#d62728")
+        self.ax_filtered.set_xlim(0, 360)
+        self.ax_filtered.set_xlabel("Fase (°)")
+        self.ax_filtered.set_ylabel("Densidad (norm.)")
+        self.ax_filtered.set_title("Proyección fase (ANGPD 2.0)")
+        self.ax_filtered.grid(True, alpha=0.2)
+        try:
+            self.ax_filtered.legend(loc="upper right", fontsize=8)
+        except Exception:
+            pass
+
+        # Proyección de amplitud (derecha abajo)
+        self.ax_probs.plot(amp_x, amp_pos, label="P_a+ (norm)", color="#2ca02c")
+        self.ax_probs.plot(amp_x, amp_neg, label="P_a- (norm)", color="#ff7f0e")
+        self.ax_probs.set_xlabel("Amplitud")
+        self.ax_probs.set_ylabel("Densidad (norm.)")
+        self.ax_probs.set_title("Proyección amplitud (ANGPD 2.0)")
+        self.ax_probs.grid(True, alpha=0.2)
+        try:
+            self.ax_probs.legend(loc="upper right", fontsize=8)
+        except Exception:
+            pass
+
+        # KPIs en el panel de texto
+        self.ax_text.set_axis_off()
+        lines = [
+            f"phase_width = {kpis.get('phase_width_deg', 0):.1f}°",
+            f"phase_sym   = {kpis.get('phase_symmetry', 0):.2f}",
+            f"phase_peaks = {kpis.get('phase_peaks', 0)}",
+            f"amp_conc    = {kpis.get('amp_concentration', 0):.2f}",
+            f"amp_peaks   = {kpis.get('amp_peaks', 0)}",
+        ]
+        y = 0.9
+        for ln in lines:
+            self.ax_text.text(0.05, y, ln, fontsize=11, transform=self.ax_text.transAxes, ha="left")
+            y -= 0.1
+        self.ax_text.set_title("ANGPD avanzado – KPIs", loc="left")
+
     def _ensure_conclusion_axis(self):
         """Devuelve el eje que ocupa todo el rectángulo inferior."""
         if self.ax_conclusion_box is None:
@@ -3269,6 +3355,9 @@ class PRPDWindow(QMainWindow):
                 self.ax_probs.text(0.5, 0.5, "Sin quantity en XML", ha="center", va="center")
                 self.ax_probs.set_xticks([])
                 self.ax_probs.set_yticks([])
+        elif view_mode.startswith("angpd avanzado"):
+            # Nueva vista de proyecciones ANGPD 2.0 (fase/amplitud)
+            self._draw_angpd_advanced(r)
         elif view_mode == "nubes":
             # Vista unificada: Alineado/filtrado + S3 + S4 + S5 en 2x2
             self._render_nubes_grid(ph_al, amp_al, quint_idx, selected_s3, clouds_s4, clouds_s5)
