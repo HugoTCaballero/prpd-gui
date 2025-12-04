@@ -2,6 +2,37 @@ from __future__ import annotations
 
 import numpy as np
 
+from PRPDapp.pd_rules_config import (
+    TH_FA_WIDTH_CAVIDAD_MAX,
+    TH_SYM_CAVIDAD_MIN,
+    TH_CORR_CAVIDAD_MIN,
+    TH_CONC_CAVIDAD_MIN,
+    TH_FA_WIDTH_SUP_MIN,
+    TH_FA_WIDTH_SUP_MAX,
+    TH_SYM_SUP_MIN,
+    TH_CORR_SUP_MIN,
+    TH_P95_REL_SUP_MIN,
+    TH_PULSES_RATIO_CORONA,
+    TH_P95_REL_CORONA_MAX,
+    TH_PEAKS_TOTAL_CORONA,
+    TH_SKEW_CORONA_MIN,
+    TH_FA_WIDTH_CORONA_MAX,
+    TH_SYM_CORONA_MAX,
+    TH_FA_WIDTH_FLOTANTE_MIN,
+    TH_PEAKS_FLOTANTE_MIN,
+    TH_KURT_FLOTANTE_MAX,
+    TH_PULSES_RUIDO_MAX,
+    TH_P95_REL_RUIDO_MAX,
+    TH_RATIO_RUIDO_MAX,
+    TH_CONC_RUIDO_MAX,
+    TH_GAP_P50_RUIDO_MIN,
+    TH_GAP_P5_RUIDO_MIN,
+    TH_GAP_P5_AVANZADA_MAX,
+    TH_GAP_P5_DESARROLLO_MAX,
+    TH_RATIO_NANGPD_RIESGO_ALTO,
+    TH_PULSES_RIESGO_ALTO,
+)
+
 PD_CLASSES = [
     "corona",
     "superficial_tracking",
@@ -54,6 +85,7 @@ def build_rule_features(result: dict) -> dict:
         # Severidad base
         "n_angpd_angpd_ratio": kpis.get("n_ang_ratio"),
         "total_pulses": metrics.get("total_count") or fa.get("total_pulses") or kpis.get("total_pulses"),
+        "pulses_ratio": metrics.get("pulses_ratio"),
 
         # Gap-time (según nombres disponibles)
         "gap_p50_ms": gap.get("p50_ms") or gap.get("P50_ms"),
@@ -80,6 +112,7 @@ def rule_based_scores(features: dict) -> dict:
     max_amp = _safe(features.get("fa_max_amp"))
     p95_amp = _safe(features.get("fa_p95_amp")) or _safe(features.get("p95_global_amp"))
     ratio = _safe(features.get("n_angpd_angpd_ratio"))
+    pulses_ratio = _safe(features.get("pulses_ratio"), default=1.0)
     n_peaks_pos = _safe(features.get("num_peaks_pos"))
     n_peaks_neg = _safe(features.get("num_peaks_neg"))
     skew_pos = _safe(features.get("skew_pos"))
@@ -92,45 +125,46 @@ def rule_based_scores(features: dict) -> dict:
     gap_p5 = _safe(features.get("gap_p5_ms"))
 
     # Cavidad interna
-    if fw and fw < 90:
+    if fw and fw < TH_FA_WIDTH_CAVIDAD_MAX:
         scores["cavidad_interna"] += 1.0
-    if sym > 0.85 and corr > 0.8:
+    if sym > TH_SYM_CAVIDAD_MIN and corr > TH_CORR_CAVIDAD_MIN:
         scores["cavidad_interna"] += 1.0
-    if conc > 1.3:
+    if conc > TH_CONC_CAVIDAD_MIN:
         scores["cavidad_interna"] += 0.5
 
     # Superficial / tracking
-    if 90 <= fw <= 180:
+    if TH_FA_WIDTH_SUP_MIN <= fw <= TH_FA_WIDTH_SUP_MAX:
         scores["superficial_tracking"] += 1.0
-    if sym > 0.75 and corr > 0.6:
+    if sym > TH_SYM_SUP_MIN and corr > TH_CORR_SUP_MIN:
         scores["superficial_tracking"] += 0.5
-    if p95_amp and max_amp and p95_amp > 0.3 * max_amp:
+    if p95_amp and max_amp and p95_amp > TH_P95_REL_SUP_MIN * max_amp:
         scores["superficial_tracking"] += 0.5
 
     # Corona (unipolaridad, pocos picos, amplitud moderada)
     peaks_total = (n_peaks_pos or 0) + (n_peaks_neg or 0)
-    # usar skew para detectar asimetría fuerte
-    if abs(skew_pos) > 1.0 or abs(skew_neg) > 1.0:
-        scores["corona"] += 0.5
-    if peaks_total <= 2 and (p95_amp < 0.4 * max_amp if max_amp else True):
+    if pulses_ratio > TH_PULSES_RATIO_CORONA or pulses_ratio < 1.0 / max(TH_PULSES_RATIO_CORONA, 1e-6):
         scores["corona"] += 1.0
-    if fw < 140 and sym < 0.7:
+    if abs(skew_pos) > TH_SKEW_CORONA_MIN or abs(skew_neg) > TH_SKEW_CORONA_MIN:
+        scores["corona"] += 0.5
+    if peaks_total <= TH_PEAKS_TOTAL_CORONA and (p95_amp < TH_P95_REL_CORONA_MAX * max_amp if max_amp else True):
+        scores["corona"] += 1.0
+    if fw < TH_FA_WIDTH_CORONA_MAX and sym < TH_SYM_CORONA_MAX:
         scores["corona"] += 0.5
 
     # Flotante (muy disperso, varios picos, kurtosis baja)
-    if fw > 180:
+    if fw > TH_FA_WIDTH_FLOTANTE_MIN:
         scores["flotante"] += 1.0
-    if peaks_total >= 3:
+    if peaks_total >= TH_PEAKS_FLOTANTE_MIN:
         scores["flotante"] += 0.5
-    if (kurt_pos and kurt_pos < 2.5) or (kurt_neg and kurt_neg < 2.5):
+    if (kurt_pos and kurt_pos < TH_KURT_FLOTANTE_MAX) or (kurt_neg and kurt_neg < TH_KURT_FLOTANTE_MAX):
         scores["flotante"] += 0.5
 
     # Ruido / baja severidad
-    if pulses < 200 and (p95_amp < 0.2 * max_amp if max_amp else True):
+    if pulses < TH_PULSES_RUIDO_MAX and (p95_amp < TH_P95_REL_RUIDO_MAX * max_amp if max_amp else True):
         scores["ruido_baja"] += 1.0
-    if ratio < 3.0 and conc < 1.1 and fw > 120:
+    if ratio < TH_RATIO_RUIDO_MAX and conc < TH_CONC_RUIDO_MAX and fw > TH_FA_WIDTH_SUP_MAX:
         scores["ruido_baja"] += 0.5
-    if gap_p50 > 20 and gap_p5 > 10:
+    if gap_p50 > TH_GAP_P50_RUIDO_MIN and gap_p5 > TH_GAP_P5_RUIDO_MIN:
         scores["ruido_baja"] += 0.5
 
     total = sum(v for v in scores.values() if v > 0)
@@ -142,6 +176,7 @@ def rule_based_scores(features: dict) -> dict:
 
 
 def infer_pd_summary(features: dict, probs: dict) -> dict:
+    """Construye el resumen legible para la GUI a partir de las probabilidades."""
     class_id = max(probs, key=probs.get)
     class_label = PD_LABELS.get(class_id, class_id)
 
@@ -150,16 +185,17 @@ def infer_pd_summary(features: dict, probs: dict) -> dict:
     ratio = _safe(features.get("n_angpd_angpd_ratio"))
     pulses = _safe(features.get("total_pulses"))
 
-    if gap_p5 < 3.0:
+    if gap_p5 < TH_GAP_P5_AVANZADA_MAX:
         stage = "avanzada"
         risk = "alto"
-    elif 3.0 <= gap_p5 < 7.0:
+    elif TH_GAP_P5_AVANZADA_MAX <= gap_p5 < TH_GAP_P5_DESARROLLO_MAX:
         stage = "en desarrollo"
         risk = "medio"
     else:
         stage = "incipiente"
         risk = "bajo"
-    if ratio > 15 or pulses > 2000:
+
+    if ratio > TH_RATIO_NANGPD_RIESGO_ALTO or pulses > TH_PULSES_RIESGO_ALTO:
         if risk == "medio":
             risk = "alto"
         elif risk == "bajo":
@@ -177,10 +213,10 @@ def infer_pd_summary(features: dict, probs: dict) -> dict:
         location = "Sin indicios claros de defecto localizado"
 
     explanation = [
-        f"Clase dominante: {class_label} (prob={probs.get(class_id,0):.2f}).",
+        f"Clase dominante: {class_label} (prob={probs.get(class_id, 0.0):.2f}).",
         f"Etapa estimada: {stage}. Riesgo: {risk}.",
         f"Gap-time P50={gap_p50:.1f} ms, P5={gap_p5:.1f} ms.",
-        f"Relación N-ANGPD/ANGPD≈{ratio:.1f}, pulsos útiles≈{pulses}.",
+        f"Relación N-ANGPD/ANGPD≈{ratio:.1f}, pulsos útiles≈{pulses:.0f}.",
         f"Ubicación probable: {location}.",
     ]
 
@@ -193,4 +229,3 @@ def infer_pd_summary(features: dict, probs: dict) -> dict:
         "location_hint": location,
         "explanation": explanation,
     }
-

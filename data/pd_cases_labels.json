@@ -1,0 +1,27 @@
+﻿{
+  "superficial_01.xml": {
+    "true_class": "superficial_tracking",
+    "true_stage": "incipiente",
+    "notes": "Ejemplo: tracking leve en soportes. Reemplaza con tu archivo real."
+  },
+  "cavidad_01.xml": {
+    "true_class": "cavidad_interna",
+    "true_stage": "en_desarrollo",
+    "notes": "Ejemplo: cavidad confirmada. Reemplaza con tu archivo real."
+  },
+  "corona_01.xml": {
+    "true_class": "corona",
+    "true_stage": "incipiente",
+    "notes": "Ejemplo: corona en boquillas."
+  },
+  "flotante_01.xml": {
+    "true_class": "flotante",
+    "true_stage": "en_desarrollo",
+    "notes": "Ejemplo: conexión floja."
+  },
+  "ruido_01.xml": {
+    "true_class": "ruido_baja",
+    "true_stage": "na",
+    "notes": "Ejemplo: sólo ruido / baja severidad."
+  }
+}

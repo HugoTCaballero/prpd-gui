@@ -1,0 +1,41 @@
+# Umbrales ajustables para el clasificador por reglas (FA profile + KPIs)
+
+# --- Cavidad interna ---
+TH_FA_WIDTH_CAVIDAD_MAX = 90.0       # grados
+TH_SYM_CAVIDAD_MIN = 0.85
+TH_CORR_CAVIDAD_MIN = 0.8
+TH_CONC_CAVIDAD_MIN = 1.3
+
+# --- Superficial / Tracking ---
+TH_FA_WIDTH_SUP_MIN = 90.0
+TH_FA_WIDTH_SUP_MAX = 180.0
+TH_SYM_SUP_MIN = 0.75
+TH_CORR_SUP_MIN = 0.6
+TH_P95_REL_SUP_MIN = 0.3  # P95_amp > 0.3 * max_amp
+
+# --- Corona ---
+TH_PULSES_RATIO_CORONA = 2.0
+TH_P95_REL_CORONA_MAX = 0.4
+TH_PEAKS_TOTAL_CORONA = 2
+TH_SKEW_CORONA_MIN = 1.0
+TH_FA_WIDTH_CORONA_MAX = 140.0
+TH_SYM_CORONA_MAX = 0.7
+
+# --- Flotante ---
+TH_FA_WIDTH_FLOTANTE_MIN = 180.0
+TH_PEAKS_FLOTANTE_MIN = 3
+TH_KURT_FLOTANTE_MAX = 2.5
+
+# --- Ruido / baja severidad ---
+TH_PULSES_RUIDO_MAX = 200
+TH_P95_REL_RUIDO_MAX = 0.2
+TH_RATIO_RUIDO_MAX = 3.0
+TH_CONC_RUIDO_MAX = 1.1
+TH_GAP_P50_RUIDO_MIN = 20.0
+TH_GAP_P5_RUIDO_MIN = 10.0
+
+# --- Riesgo / etapa por gap-time ---
+TH_GAP_P5_AVANZADA_MAX = 3.0
+TH_GAP_P5_DESARROLLO_MAX = 7.0
+TH_RATIO_NANGPD_RIESGO_ALTO = 15.0
+TH_PULSES_RIESGO_ALTO = 2000
