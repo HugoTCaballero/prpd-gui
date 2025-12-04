@@ -4,6 +4,7 @@ import numpy as np
 
 from PRPDapp.pd_rules_config import (
     RULESET_VERSION,
+    TH_RATIO_RIESGO_ALTO,
     TH_FA_WIDTH_CAVIDAD_MAX,
     TH_SYM_CAVIDAD_MIN,
     TH_CORR_CAVIDAD_MIN,
@@ -30,7 +31,6 @@ from PRPDapp.pd_rules_config import (
     TH_GAP_P5_RUIDO_MIN,
     TH_GAP_P5_AVANZADA_MAX,
     TH_GAP_P5_DESARROLLO_MAX,
-    TH_RATIO_NANGPD_RIESGO_ALTO,
     TH_PULSES_RIESGO_ALTO,
 )
 
@@ -62,7 +62,9 @@ LOCATION_HINT = {
 def build_rule_features(result: dict) -> dict:
     metrics = result.get("metrics", {}) if isinstance(result, dict) else {}
     fa = result.get("fa_kpis", {}) if isinstance(result, dict) else {}
-    kpis = result.get("kpi", {}) if isinstance(result, dict) else {}
+    # Fuente preferida: kpis consolidados si existen
+    kpis_consolidated = result.get("kpis", {}) if isinstance(result, dict) else {}
+    kpis = kpis_consolidated if kpis_consolidated else result.get("kpi", {}) if isinstance(result, dict) else {}
     gap = result.get("gap_stats", {}) or result.get("gap_summary", {}) or {}
     hist = kpis.get("hist", {}) if isinstance(kpis, dict) else {}
     skew = metrics.get("skewness", {})
@@ -184,12 +186,11 @@ def rule_based_scores(features: dict) -> dict:
     return probs
 
 
-def _compute_stage(features: dict) -> str:
+def _infer_stage_from_gap_and_energy(features: dict) -> str:
     gap_p5 = _safe(features.get("gap_p5_ms"))
     ratio = _safe(features.get("n_angpd_angpd_ratio"))
     pulses = _safe(features.get("total_pulses"))
-    # Etapa base por gap P5
-    if gap_p5 == 0:
+    if gap_p5 <= 0:
         stage = "no_evaluada"
     elif gap_p5 < TH_GAP_P5_AVANZADA_MAX:
         stage = "avanzada"
@@ -197,10 +198,9 @@ def _compute_stage(features: dict) -> str:
         stage = "en_desarrollo"
     else:
         stage = "incipiente"
-    # Ajustes por energía
-    if stage == "incipiente" and ratio > TH_RATIO_NANGPD_RIESGO_ALTO and pulses > TH_PULSES_RIESGO_ALTO:
+    if stage == "incipiente" and ratio > TH_RATIO_RIESGO_ALTO and pulses > TH_PULSES_RIESGO_ALTO:
         stage = "en_desarrollo"
-    elif stage == "en_desarrollo" and ratio > (TH_RATIO_NANGPD_RIESGO_ALTO * 1.5) and pulses > (TH_PULSES_RIESGO_ALTO * 2):
+    elif stage == "en_desarrollo" and ratio > (TH_RATIO_RIESGO_ALTO * 1.5) and pulses > (TH_PULSES_RIESGO_ALTO * 2):
         stage = "avanzada"
     return stage
 
@@ -222,7 +222,7 @@ def _compute_severity_index(features: dict) -> float:
     return float(10.0 * s)
 
 
-def _severity_level(sev_idx: float) -> str:
+def _severity_level_from_index(sev_idx: float) -> str:
     if sev_idx < 3.0:
         return "bajo"
     elif sev_idx < 6.0:
@@ -230,7 +230,7 @@ def _severity_level(sev_idx: float) -> str:
     return "alto"
 
 
-def _combine_stage_severity(stage: str, severity: str) -> str:
+def _combine_stage_and_severity(stage: str, severity: str) -> str:
     if stage == "incipiente":
         return "bajo" if severity == "bajo" else "medio"
     if stage == "en_desarrollo":
@@ -290,19 +290,29 @@ def _recommend_actions(class_id: str, stage: str, severity: str, risk: str) -> l
 
 def infer_pd_summary(features: dict, probs: dict) -> dict:
     """Construye el resumen legible para la GUI a partir de las probabilidades."""
-    class_id = max(probs, key=probs.get)
+    # Normalizar/proteger probs
+    if not probs:
+        probs = {cls: (1.0 if cls == "ruido_baja" else 0.0) for cls in PD_CLASSES}
+    values = np.asarray([probs.get(cls, 0.0) for cls in PD_CLASSES], dtype=float)
+    total = float(values.sum())
+    if total <= 0:
+        values = np.asarray([1.0 if cls == "ruido_baja" else 0.0 for cls in PD_CLASSES], dtype=float)
+        total = float(values.sum())
+    probs_norm = {cls: float(values[i] / total) for i, cls in enumerate(PD_CLASSES)}
+
+    class_id = max(probs_norm, key=probs_norm.get)
     class_label = PD_LABELS.get(class_id, class_id)
 
-    gap_p50 = _safe(features.get("gap_p50_ms"))
-    gap_p5 = _safe(features.get("gap_p5_ms"))
-    ratio = _safe(features.get("n_angpd_angpd_ratio"))
-    pulses = _safe(features.get("total_pulses"))
+    gap_p50 = features.get("gap_p50_ms")
+    gap_p5 = features.get("gap_p5_ms")
+    ratio = features.get("n_angpd_angpd_ratio")
+    pulses = features.get("total_pulses")
 
     # Etapa y severidad
-    stage = _compute_stage(features)
+    stage = _infer_stage_from_gap_and_energy(features)
     sev_idx = _compute_severity_index(features)
-    sev_level = _severity_level(sev_idx)
-    risk = _combine_stage_severity(stage, sev_level)
+    sev_level = _severity_level_from_index(sev_idx)
+    risk = _combine_stage_and_severity(stage, sev_level)
 
     # LifeTime
     lifetime_score = _compute_lifetime_score(stage, sev_idx)
@@ -312,32 +322,36 @@ def infer_pd_summary(features: dict, probs: dict) -> dict:
     location = LOCATION_HINT.get(class_id, "Ubicación no determinada")
 
     explanation = [
-        f"Clase dominante: {class_label} (prob={probs.get(class_id, 0.0):.2f}).",
-        f"Etapa: {stage}. Severidad: {sev_level} ({sev_idx:.1f}/10).",
-        f"Gap-time P50={gap_p50:.1f} ms, P5={gap_p5:.1f} ms.",
-        f"Relación N-ANGPD/ANGPD≈{ratio:.1f}, pulsos útiles≈{pulses:.0f}.",
-        f"Ubicación probable: {location}.",
+        f"Clase dominante: {class_label} (prob={probs_norm.get(class_id, 0.0):.2f}).",
+        f"Etapa estimada: {stage}. Severidad: {sev_level} (índice {sev_idx:.1f}/10).",
     ]
+    if gap_p50 is not None and gap_p5 is not None:
+        explanation.append(f"Gap-time: P50≈{gap_p50:.2f} ms, P5≈{gap_p5:.2f} ms.")
+    elif gap_p5 is not None:
+        explanation.append(f"Gap-time: P5≈{gap_p5:.2f} ms.")
+    if ratio is not None:
+        explanation.append(f"Relación N-ANGPD/ANGPD≈{ratio:.1f}.")
+    if pulses is not None:
+        explanation.append(f"Número de pulsos útiles≈{int(pulses)}.")
+    explanation.append(f"LifeTime score: {lifetime_score}/100 ({lifetime_band}).")
+    explanation.append(f"Ubicación probable: {location}.")
 
     actions = _recommend_actions(class_id, stage, sev_level, risk)
 
     return {
         "class_id": class_id,
         "class_label": class_label,
-        "class_probs": probs,
-        "classes": list(probs.keys()),
-        "ruleset_version": RULESET_VERSION,
+        "class_probs": probs_norm,
         "dominant_pd": class_label,
         "location_hint": location,
         "stage": stage,
         "severity_level": sev_level,
         "severity_index": float(sev_idx),
-        "stage": stage,
         "risk_level": risk,
         "lifetime_score": lifetime_score,
         "lifetime_band": lifetime_band,
         "lifetime_text": lifetime_text,
         "actions": actions,
-        "location_hint": location,
         "explanation": explanation,
+        "ruleset_version": RULESET_VERSION,
     }
