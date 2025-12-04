@@ -2645,51 +2645,75 @@ class PRPDWindow(QMainWindow):
         metrics = metrics or {}
         metrics_adv = metrics_adv or result.get("metrics_advanced") or {}
         mask_label = (self.last_run_profile or {}).get("mask", self.cmb_masks.currentText())
-        heur_probs = {}
-        try:
-            heur_probs = metrics_adv.get("heuristic_probs") or {}
-        except Exception:
-            heur_probs = {}
-
-        ann_probs = {}
-        if heur_probs:
-            ann_probs = {str(k).lower(): float(v) for k, v in heur_probs.items() if v is not None}
+        # Usar rule_pd si existe, si no, fallback a heurística previa
+        rule = result.get("rule_pd", {}) if isinstance(result, dict) else {}
+        rule_probs = rule.get("class_probs", {}) if isinstance(rule, dict) else {}
+        if rule_probs:
+            p_corona = float(rule_probs.get("corona", 0.0))
+            p_sup = float(rule_probs.get("superficial_tracking", 0.0)) + float(rule_probs.get("flotante", 0.0))
+            p_cav = float(rule_probs.get("cavidad_interna", 0.0))
+            total_rule = p_corona + p_sup + p_cav
+            if total_rule > 0:
+                p_corona /= total_rule
+                p_sup /= total_rule
+                p_cav /= total_rule
+            values = [p_corona, p_sup, p_cav]
+            labels = ["Corona +/-", "Superficial / Tracking", "Cavidad"]
+            colors = [
+                CLASS_INFO.get("corona", {}).get("color", "#888888"),
+                CLASS_INFO.get("superficial", {}).get("color", "#888888") or CLASS_INFO.get("superficial_tracking", {}).get("color", "#888888"),
+                CLASS_INFO.get("cavidad", {}).get("color", "#888888") or CLASS_INFO.get("cavidad_interna", {}).get("color", "#888888"),
+            ]
+            bar_keys = ["corona", "superficial_tracking", "cavidad_interna"]
         else:
-            ann_probs = self._last_ann_probs or self._infer_ann_probabilities(metrics, summary, mask_label)
-        ann_norm = {str(k).lower(): float(v) for k, v in ann_probs.items() if v is not None}
+            heur_probs = {}
+            try:
+                heur_probs = metrics_adv.get("heuristic_probs") or {}
+            except Exception:
+                heur_probs = {}
 
-        # Orden principal de barras (sin duplicar corona si viene agregada)
-        bar_keys = list(self.pd_classes or CLASS_NAMES)
-        labels = []
-        colors = []
-        values = []
-        for k in bar_keys:
-            info = CLASS_INFO.get(k, {"name": k, "color": "#888888"})
-            labels.append(info.get("name", k))
-            colors.append(info.get("color", "#888888"))
-            values.append(ann_norm.get(k, 0.0))
-
-        # Fallback si todo está en cero
-        if not any(values):
-            inferred = (summary.get("pd_type") or "").lower()
-            if "superficial" in inferred or "tracking" in inferred:
-                values[bar_keys.index("superficial")] = 1.0
-            elif "corona" in inferred:
-                values[bar_keys.index("corona")] = 1.0
-            elif "cavidad" in inferred:
-                values[bar_keys.index("cavidad")] = 1.0
+            ann_probs = {}
+            if heur_probs:
+                ann_probs = {str(k).lower(): float(v) for k, v in heur_probs.items() if v is not None}
             else:
-                values[bar_keys.index("ruido")] = 0.5
+                ann_probs = self._last_ann_probs or self._infer_ann_probabilities(metrics, summary, mask_label)
+            ann_norm = {str(k).lower(): float(v) for k, v in ann_probs.items() if v is not None}
 
-        values = [max(0.0, float(v)) for v in values]
-        total = sum(values)
-        if total <= 0:
-            total = 1.0
-        values = [min(1.0, max(0.0, v / total)) for v in values]
-        try:
-            self._last_ann_probs = {k: v for k, v in zip(bar_keys, values)}
-        except Exception:
-            pass
+            # Orden principal de barras (sin duplicar corona si viene agregada)
+            bar_keys = list(self.pd_classes or CLASS_NAMES)
+            labels = []
+            colors = []
+            values = []
+            for k in bar_keys:
+                info = CLASS_INFO.get(k, {"name": k, "color": "#888888"})
+                labels.append(info.get("name", k))
+                colors.append(info.get("color", "#888888"))
+                values.append(ann_norm.get(k, 0.0))
+
+            # Fallback si todo está en cero
+            if not any(values):
+                inferred = (summary.get("pd_type") or "").lower()
+                if "superficial" in inferred or "tracking" in inferred:
+                    if "superficial" in bar_keys:
+                        values[bar_keys.index("superficial")] = 1.0
+                elif "corona" in inferred:
+                    values[bar_keys.index("corona")] = 1.0
+                elif "cavidad" in inferred:
+                    if "cavidad" in bar_keys:
+                        values[bar_keys.index("cavidad")] = 1.0
+                else:
+                    if "ruido" in bar_keys:
+                        values[bar_keys.index("ruido")] = 0.5
+
+            values = [max(0.0, float(v)) for v in values]
+            total = sum(values)
+            if total <= 0:
+                total = 1.0
+            values = [min(1.0, max(0.0, v / total)) for v in values]
+            try:
+                self._last_ann_probs = {k: v for k, v in zip(bar_keys, values)}
+            except Exception:
+                pass
 
         bars = ax.bar(labels, values, color=colors, edgecolor="#37474f", linewidth=1.0)
         ax.set_ylim(0, 1.05)

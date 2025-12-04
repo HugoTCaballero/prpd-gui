@@ -486,10 +486,11 @@ def render_conclusions(wnd, result: dict, payload: dict | None = None) -> None:
             gap_text = gap_info.get("action", "")
         y_right = _render_action_badges(right_ax, y_right, "ACCIÓN GAP-TIME P50", gap_text, gap_color) - 0.08
 
-    stage = (manual.get("stage") if manual else None) or summary.get("stage", "N/D")
-    pd_type = (manual.get("mode") if manual else None) or summary.get("pd_type", "N/D")
-    location = (manual.get("location") if manual else None) or summary.get("location", "N/D")
-    risk_manual_text = manual.get("risk") if manual else None
+    rule_pd = result.get("rule_pd", {}) if isinstance(result, dict) else {}
+    stage = (manual.get("stage") if manual else None) or rule_pd.get("stage") or summary.get("stage", "N/D")
+    pd_type = (manual.get("mode") if manual else None) or rule_pd.get("class_label") or summary.get("pd_type", "N/D")
+    location = (manual.get("location") if manual else None) or rule_pd.get("location_hint") or summary.get("location", "N/D")
+    risk_manual_text = (manual.get("risk") if manual else None) or rule_pd.get("risk_level")
 
     ann_probs = wnd._last_ann_probs or {}
     if ann_probs:

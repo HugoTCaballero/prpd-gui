@@ -89,6 +89,7 @@ import numpy as np
 from sklearn.cluster import DBSCAN, KMeans
 import xml.etree.ElementTree as ET
 import math
+from PRPDapp.pd_rules import build_rule_features, rule_based_scores, infer_pd_summary
 
 
 def debug_dump_result_keys(result):
@@ -1016,6 +1017,21 @@ def process_prpd(path: Path, out_root: Path, force_phase_offsets=None, fast_mode
         fa_profile = None
         fa_kpis = None
 
+    # Clasificador basado en reglas (usa KPIs ya calculados)
+    rule_summary = None
+    try:
+        if not result.get("metrics"):
+            try:
+                from PRPDapp.logic import compute_pd_metrics as logic_compute_pd_metrics
+                result["metrics"] = logic_compute_pd_metrics(result, gap_stats=None)
+            except Exception:
+                pass
+        features = build_rule_features(result)
+        probs = rule_based_scores(features)
+        rule_summary = infer_pd_summary(features, probs)
+    except Exception as e:
+        print("[WARN] Error en clasificador de reglas:", e)
+
     # guardar auditoría mínima
     run_id = path.stem
     np.savez(out_root/"aligned"/f"{run_id}_aligned.npz", phase_deg=ph_al, amp=data["amplitude"])
@@ -1051,6 +1067,7 @@ def process_prpd(path: Path, out_root: Path, force_phase_offsets=None, fast_mode
         "angpd": angpd,
         "fa_profile": fa_profile,
         "fa_kpis": fa_kpis,
+        "rule_pd": rule_summary,
         "s5_min_frac": s5_min_frac,
         "s3_eps": s3_eps,
         "s3_min_samples": s3_min_samples,
