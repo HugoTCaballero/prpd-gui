@@ -1,6 +1,6 @@
-# prpd_core.py
-# Núcleo de procesamiento: carga CSV, detección de ruido, auto-fase (0/120/240),
-# clustering DBSCAN + prune, features, heurística de clase y severidad.
+﻿# prpd_core.py
+# NÃºcleo de procesamiento: carga CSV, detecciÃ³n de ruido, auto-fase (0/120/240),
+# clustering DBSCAN + prune, features, heurÃ­stica de clase y severidad.
 # Estructura actual de result (2025-03-12, claves realmente llenadas):
 #   - raw: phase_deg, amplitude, quantity (opc)
 #   - aligned: phase_deg, amplitude, quantity/quintiles/deciles (opc), pixel (opc)
@@ -12,46 +12,46 @@
 #   - n_clusters: int
 #   - features: dict; predicted: clase heur?stica; probs: dict de probabilidades
 #   - severity_score, severity_breakdown: severidad y desglose
-#   - angpd: dict con phi_centers (0–360, bins=72), angpd (sum=1), n_angpd (max=1),
+#   - angpd: dict con phi_centers (0â€“360, bins=72), angpd (sum=1), n_angpd (max=1),
 #            angpd_qty, n_angpd_qty (si hay quantity)
 #   - s5_min_frac, s3_eps, s3_min_samples, s3_force_multi: metadatos clustering
 #   - run_id, source_path, phase_mask_ranges, pixel_deciles_meta, qty_deciles_meta,
 #     qty_quintiles_meta
-#   - Estado de “histograms” (2025-03-12): no existe result["histograms"] en el
+#   - Estado de â€œhistogramsâ€ (2025-03-12): no existe result["histograms"] en el
 #     flujo real. H_amp/H_ph se calculan on-the-fly en main.py usando aligned.
-#   - Contrato propuesto (futuro) para nueva vista “FA profile”:
+#   - Contrato propuesto (futuro) para nueva vista â€œFA profileâ€:
 #       result["fa_profile"] = {
-#           "phase_bins_deg":  np.ndarray  # centros de bins de fase (0–360°)
-#           "max_amp_by_bin":  np.ndarray  # amplitud máxima por bin
-#           "min_amp_by_bin":  np.ndarray  # amplitud mínima/percentil bajo por bin
-#           "count_by_bin":    np.ndarray  # número de pulsos por bin
+#           "phase_bins_deg":  np.ndarray  # centros de bins de fase (0â€“360Â°)
+#           "max_amp_by_bin":  np.ndarray  # amplitud mÃ¡xima por bin
+#           "min_amp_by_bin":  np.ndarray  # amplitud mÃ­nima/percentil bajo por bin
+#           "count_by_bin":    np.ndarray  # nÃºmero de pulsos por bin
 #           "max_amp_smooth":  np.ndarray  # envolvente suavizada de max_amp_by_bin
 #       }
 #       result["fa_kpis"] = {
 #           "total_pulses": int,
 #           "pulses_pos": int,
 #           "pulses_neg": int,
-#           "symmetry_index": float,   # 0–1, 1 = simetría perfecta entre semiondas
+#           "symmetry_index": float,   # 0â€“1, 1 = simetrÃ­a perfecta entre semiondas
 #           "max_amplitude": float,
 #           "mean_amplitude": float,
 #           "p95_amplitude": float,
 #           "phase_center_deg": float, # centro de masa en fase
 #           "phase_width_deg": float,  # ancho efectivo (p.ej. 90% de pulsos)
 #       }
-#     Solo contrato; la lógica se implementará más adelante.
+#     Solo contrato; la lÃ³gica se implementarÃ¡ mÃ¡s adelante.
 
 # ----------------------------------------------------------------------
-# Vista "FA profile" (fase–amplitud)
+# Vista "FA profile" (faseâ€“amplitud)
 #
-# Esta vista proporciona un resumen 1D del patrón PRPD.
+# Esta vista proporciona un resumen 1D del patrÃ³n PRPD.
 #
-# Campos añadidos a `result`:
+# Campos aÃ±adidos a `result`:
 # - result["fa_profile"]:
-#     - "phase_bins_deg": centros de bin de fase (0–360°)
-#     - "max_amp_by_bin": amplitud máxima en cada bin de fase
+#     - "phase_bins_deg": centros de bin de fase (0â€“360Â°)
+#     - "max_amp_by_bin": amplitud mÃ¡xima en cada bin de fase
 #     - "min_amp_by_bin": percentil bajo de amplitud por bin
-#     - "count_by_bin":   número de pulsos en cada bin
-#     - "max_amp_smooth": envolvente suavizada para análisis visual/KPIs
+#     - "count_by_bin":   nÃºmero de pulsos en cada bin
+#     - "max_amp_smooth": envolvente suavizada para anÃ¡lisis visual/KPIs
 #     - "bin_width_deg":  ancho de bin usado
 # - result["fa_kpis"]:
 #     - "total_pulses", "pulses_pos", "pulses_neg"
@@ -63,13 +63,13 @@
 # Nota: ANGPD y los histogramas existentes no se modifican.
 # ----------------------------------------------------------------------
 
-# Resumen Paso 1 – Estado al 2025-03-12
+# Resumen Paso 1 â€“ Estado al 2025-03-12
 # 1) result actual:
 #    raw, aligned, labels, keep_mask, labels_aligned, phase_offset, phase_vector_R,
 #    has_noise/noise_meta, n_clusters, features, predicted/probs, severity_score/
 #    severity_breakdown, angpd, s5_min_frac, s3_eps, s3_min_samples, s3_force_multi,
 #    run_id, source_path, phase_mask_ranges, pixel_deciles_meta, qty_deciles_meta,
-#    qty_quintiles_meta. angpd → phi_centers, angpd, n_angpd, angpd_qty, n_angpd_qty.
+#    qty_quintiles_meta. angpd â†’ phi_centers, angpd, n_angpd, angpd_qty, n_angpd_qty.
 # 2) ANGPD:
 #    se calcula en _compute_angpd; usa aligned.phase_deg (y opcionalmente weights
 #    de amplitud o quantity). Es 1D vs fase (bins=72) y NO es histograma 2D.
@@ -78,10 +78,10 @@
 #    N=16 bins, no existe result["histograms"].
 # 4) Legacy:
 #    result["histograms"] no existe; cualquier intento previo marcado como no usado.
-# 5) Nueva vista “FA profile”:
+# 5) Nueva vista â€œFA profileâ€:
 #    claves reservadas result["fa_profile"] / result["fa_kpis"] con contrato de datos
-#    documentado; stubs añadidos (compute_fa_profile_stub / compute_fa_kpis_stub),
-#    aún no conectados al flujo.
+#    documentado; stubs aÃ±adidos (compute_fa_profile_stub / compute_fa_kpis_stub),
+#    aÃºn no conectados al flujo.
 
 from __future__ import annotations
 from pathlib import Path
@@ -96,7 +96,7 @@ from PRPDapp.ann_features import build_ann_feature_vector
 
 def debug_dump_result_keys(result):
     """
-    Solo para depuración manual. Imprime claves principales de result y, si existe,
+    Solo para depuraciÃ³n manual. Imprime claves principales de result y, si existe,
     las claves de result["angpd"]. No se usa en la GUI.
     """
     try:
@@ -141,7 +141,7 @@ def load_csv_prpd(path: Path) -> dict:
                 continue
     ph = np.asarray(ph, dtype=float)
     amp = np.asarray(amp, dtype=float)
-    # normalización ligera de amplitud para algoritmos (no afecta reporte)
+    # normalizaciÃ³n ligera de amplitud para algoritmos (no afecta reporte)
     amp_norm = robust_scale(amp)
     return {"phase_deg": wrap360(ph), "amplitude": amp, "amp_norm": amp_norm}
 
@@ -205,7 +205,7 @@ def _parse_megger_lists(root):
     - Prioriza 'pixel' si existe; si no, usa 'sample'.
     - Convierte 'times' (ms, 0..16.6) a fase 0..360.
     - Amplitud = 'pixel' invertido y normalizado a 0..100; si no hay pixel, 'sample' min-max a 0..100.
-    Devuelve (phase_deg, amplitude) o (None, None) si no se encuentran listas válidas.
+    Devuelve (phase_deg, amplitude) o (None, None) si no se encuentran listas vÃ¡lidas.
     """
     def to_float_vec(s: str):
         s = (s or "").replace("\n", " ").replace("\t", " ")
@@ -280,7 +280,7 @@ def _parse_megger_lists(root):
 def load_xml_prpd(path: Path) -> dict:
     tree = ET.parse(str(path))
     root = tree.getroot()
-    # 1) Intentar formato genérico por pares phase/amplitude
+    # 1) Intentar formato genÃ©rico por pares phase/amplitude
     pts = _parse_points_xml_auto(root)
     pixel_vals = None
     if not pts:
@@ -310,7 +310,7 @@ def load_prpd(path: Path) -> dict:
         return load_csv_prpd(p)
     if ext == ".xml":
         return load_xml_prpd(p)
-    # intento heurístico: si no hay extensión o es desconocida, probar CSV y luego XML
+    # intento heurÃ­stico: si no hay extensiÃ³n o es desconocida, probar CSV y luego XML
     try:
         return load_csv_prpd(p)
     except Exception:
@@ -335,13 +335,13 @@ def grid_noise_gate(phase_deg, amp_norm, bins_phase=64, bins_amp=48, min_count=3
     if occupied == 0:
         return True, {"occupied":0,"strong":0,"ratio":0.0}
     ratio = strong/max(occupied,1)
-    # heurística: si la mayoría de celdas ocupadas ya son fuertes → poco ruido
+    # heurÃ­stica: si la mayorÃ­a de celdas ocupadas ya son fuertes â†’ poco ruido
     has_noise = not (ratio >= ratio_thresh)
     return has_noise, {"occupied":int(occupied), "strong":int(strong), "ratio":float(ratio)}
 
 # ---------- fase ----------
 def choose_phase_offset(phase_deg, amp_norm, candidates=(0,120,240)):
-    # elegir offset que maximiza concentración vectorial después de rotar
+    # elegir offset que maximiza concentraciÃ³n vectorial despuÃ©s de rotar
     best_off, best_R = 0, -1
     ang = np.deg2rad(phase_deg)
     for off in candidates:
@@ -384,7 +384,7 @@ def cluster_and_prune(phase_deg, amp_norm, eps=0.065, min_samples=20, min_share=
             mask = labels>=0
         except Exception:
             pass
-    # prune por participación mínima
+    # prune por participaciÃ³n mÃ­nima
     keep = np.zeros_like(labels, dtype=bool)
     n = len(labels)
     if keep_all:
@@ -421,13 +421,13 @@ def polarity_balance(a):
     pos = np.mean(a>=0); neg = 1-pos
     return 1.0 - abs(pos-neg)  # 1 = balanceado
 
-# ---------- heurística de clase ----------
+# ---------- heurÃ­stica de clase ----------
 def heuristic_class(features):
     # Reglas simples (placeholder si no hay ANN entrenada)
     p95 = features["p95_amp"]
     R   = features["R_phase"]
     bal = features["polarity_balance"]
-    # umbrales rápidos
+    # umbrales rÃ¡pidos
     if p95>1.5 and R>0.65 and bal<0.6:
         cls = "corona"
     elif p95>1.0 and R>0.55 and bal>=0.6:
@@ -488,7 +488,7 @@ def severity_with_breakdown(features):
 def _compute_angpd(phase_deg: np.ndarray, bins: int = 72, weights: np.ndarray | None = None) -> dict:
     """Calcula ANGPD y N-ANGPD como curva 1D vs fase (0..360).
 
-    NOTA (2025-03-12): esto no es un histograma 2D. La discretización
+    NOTA (2025-03-12): esto no es un histograma 2D. La discretizaciÃ³n
     en `bins` (por defecto 72) solo sirve para obtener phi_centers y
     las curvas 1D angpd (sum=1) y n_angpd (max=1).
     """
@@ -516,11 +516,11 @@ def compute_fa_profile(
     smooth_window_bins: int = 5,
 ) -> dict:
     """
-    Perfil fase–amplitud (FA) proyectado a 1D por bins de fase + envolvente suavizada.
-    - phase_bins_deg: centros de bins de fase (0–360)
-    - max_amp_by_bin / min_amp_by_bin: amplitud máx / min por bin
-    - count_by_bin: número de pulsos por bin
-    - max_amp_smooth: media móvil circular de la envolvente máxima
+    Perfil faseâ€“amplitud (FA) proyectado a 1D por bins de fase + envolvente suavizada.
+    - phase_bins_deg: centros de bins de fase (0â€“360)
+    - max_amp_by_bin / min_amp_by_bin: amplitud mÃ¡x / min por bin
+    - count_by_bin: nÃºmero de pulsos por bin
+    - max_amp_smooth: media mÃ³vil circular de la envolvente mÃ¡xima
     """
     phase = np.asarray(aligned.get("phase_deg", []), dtype=float)
     amp = np.asarray(aligned.get("amplitude", []), dtype=float)
@@ -557,7 +557,7 @@ def compute_fa_profile(
         # percentil bajo para no quedarnos con outliers de ruido
         min_amp_by_bin[i] = float(np.percentile(vals, 10.0))
 
-    # suavizado circular de la envolvente máxima
+    # suavizado circular de la envolvente mÃ¡xima
     max_amp_clean = np.copy(max_amp_by_bin)
     nan_mask = np.isnan(max_amp_clean)
     if np.any(nan_mask):
@@ -608,7 +608,7 @@ def compute_fa_kpis(aligned: dict, fa_profile: dict) -> dict:
     else:
         qty = np.ones_like(amp, dtype=float)
 
-    # Separación de semicírculos
+    # SeparaciÃ³n de semicÃ­rculos
     sign = aligned.get("sign", None)
     if sign is not None:
         sign_arr = np.asarray(sign)
@@ -731,7 +731,7 @@ def _normalize_phase_mask(phase_mask) -> list[tuple[float, float]]:
 
 
 def _phase_mask_bool(phases: np.ndarray, mask_ranges: list[tuple[float, float]]) -> np.ndarray:
-    """Devuelve una máscara booleana indicando los puntos dentro de los intervalos."""
+    """Devuelve una mÃ¡scara booleana indicando los puntos dentro de los intervalos."""
     if not mask_ranges or phases.size == 0:
         return np.ones(phases.shape, dtype=bool)
     phi = np.mod(phases, 360.0)
@@ -816,7 +816,7 @@ def process_prpd(path: Path, out_root: Path, force_phase_offsets=None, fast_mode
                  pixel_deciles_keep: list[int] | None = None,
                  qty_deciles_keep: list[int] | None = None) -> dict:
     out_root = Path(out_root)
-    # Asegurar subdirectorios de auditoría
+    # Asegurar subdirectorios de auditorÃ­a
     try:
         (out_root/"aligned").mkdir(parents=True, exist_ok=True)
         (out_root/"filtered").mkdir(parents=True, exist_ok=True)
@@ -924,9 +924,9 @@ def process_prpd(path: Path, out_root: Path, force_phase_offsets=None, fast_mode
         pixel_g = pixel0[gate_mask]
     amp_norm_g = robust_scale(amp_g) if amp_g.size else np.zeros(0, dtype=float)
 
-    # clustering (si hay “mucho ruido”, DBSCAN más estricto)
-    # clustering / filtrado seg�n nivel S1 (weak) o S2 (strong)
-    # (par�metros iniciales ser�n sobreescritos abajo)
+    # clustering (si hay â€œmucho ruidoâ€, DBSCAN mÃ¡s estricto)
+    # clustering / filtrado segï¿½n nivel S1 (weak) o S2 (strong)
+    # (parï¿½metros iniciales serï¿½n sobreescritos abajo)
     # labels, keep se recalcula tras ajustar eps/min_samples/min_share
     if special_cfg:
         eps = special_cfg["eps"]
@@ -987,8 +987,8 @@ def process_prpd(path: Path, out_root: Path, force_phase_offsets=None, fast_mode
         raw["quantity"] = np.asarray(qty0, dtype=float)
 
     # ANGPD (|amplitud|) y N-ANGPD + variante por quantity si existe.
-    # NOTA (2025-03-12): ANGPD aquí es una curva 1D vs fase (0–360). La
-    # discretización en 72 bins es solo para obtener phi_centers; NO es un
+    # NOTA (2025-03-12): ANGPD aquÃ­ es una curva 1D vs fase (0â€“360). La
+    # discretizaciÃ³n en 72 bins es solo para obtener phi_centers; NO es un
     # histograma 2D. Las claves resultantes son:
     #   phi_centers, angpd (sum=1), n_angpd (max=1),
     #   angpd_qty, n_angpd_qty (si hay quantity).
@@ -1031,7 +1031,7 @@ def process_prpd(path: Path, out_root: Path, force_phase_offsets=None, fast_mode
     # Consolidar KPIs en un solo bloque para GUI/export
     # Consolidar KPIs en un solo bloque para GUI/export
     kpi_block: dict = {}
-    # Copiar/façade de FA profile
+    # Copiar/faÃ§ade de FA profile
     if isinstance(fa_kpis, dict):
         kpi_block.setdefault("fa_phase_width_deg", fa_kpis.get("phase_width_deg"))
         kpi_block.setdefault("fa_phase_center_deg", fa_kpis.get("phase_center_deg"))
@@ -1041,7 +1041,7 @@ def process_prpd(path: Path, out_root: Path, force_phase_offsets=None, fast_mode
         kpi_block.setdefault("fa_n_pulses_total", fa_kpis.get("total_pulses"))
         kpi_block.setdefault("fa_n_pulses_pos", fa_kpis.get("pulses_pos"))
         kpi_block.setdefault("fa_n_pulses_neg", fa_kpis.get("pulses_neg"))
-    # Gap-time placeholder; se completará si hay datos más adelante
+    # Gap-time placeholder; se completarÃ¡ si hay datos mÃ¡s adelante
     gap_stats = {}
     # ANGPD avanzado
     if isinstance(ang_proj_kpis, dict):
@@ -1050,6 +1050,32 @@ def process_prpd(path: Path, out_root: Path, force_phase_offsets=None, fast_mode
         kpi_block.setdefault("ang_phase_peaks", ang_proj_kpis.get("phase_peaks"))
         kpi_block.setdefault("ang_amp_concentration", ang_proj_kpis.get("amp_concentration"))
         kpi_block.setdefault("ang_amp_peaks", ang_proj_kpis.get("amp_peaks"))
+
+    # Resultado base (se reutiliza en reglas/exportes)
+    result = {
+        "raw": raw,
+        "aligned": aligned,
+        "labels": labels,                 # etiquetas DBSCAN para todos los puntos (incl. ruido)
+        "keep_mask": keep,                # mã‚±scara de puntos conservados en pruning
+        "labels_aligned": labels_aligned, # etiquetas sÐ˜lo para puntos alineados/filtrados (>=0)
+        "phase_offset": off,
+        "phase_vector_R": R,
+        "has_noise": bool(has_noise),
+        "noise_meta": noise_meta,
+        "n_clusters": int(len(set(labels[labels >= 0]))),
+        "features": feats,
+        "predicted": cls,
+        "probs": probs,
+        "severity_score": sev,
+        "severity_breakdown": sev_bd,
+        "angpd": angpd,
+        "ang_proj": ang_proj,
+        "ang_proj_kpis": ang_proj_kpis,
+        "fa_profile": fa_profile,
+        "fa_kpis": fa_kpis,
+        "kpis": kpi_block,
+        "gap_stats": gap_stats,
+    }
 
     # Clasificador basado en reglas (usa KPIs ya calculados)
     rule_summary = None
@@ -1066,7 +1092,7 @@ def process_prpd(path: Path, out_root: Path, force_phase_offsets=None, fast_mode
     except Exception as e:
         print("[WARN] Error en clasificador de reglas:", e)
 
-    # guardar auditoría mínima
+    # guardar auditorÃ­a mÃ­nima
     run_id = path.stem
     np.savez(out_root/"aligned"/f"{run_id}_aligned.npz", phase_deg=ph_al, amp=data["amplitude"])
     np.savez(out_root/"filtered"/f"{run_id}_kept.npz", phase_deg=aligned.get("phase_deg", np.zeros(0)), amp=aligned.get("amplitude", np.zeros(0)))
@@ -1082,28 +1108,7 @@ def process_prpd(path: Path, out_root: Path, force_phase_offsets=None, fast_mode
         qty_selected_meta = list(qty_deciles_selected)
     qty_dec_meta["selected"] = qty_selected_meta
 
-    return {
-        "raw": raw,
-        "aligned": aligned,
-        "labels": labels,                 # etiquetas DBSCAN para todos los puntos (incl. ruido)
-        "keep_mask": keep,                # máscara de puntos conservados en pruning
-        "labels_aligned": labels_aligned, # etiquetas sólo para puntos alineados/filtrados (>=0)
-        "phase_offset": off,
-        "phase_vector_R": R,
-        "has_noise": bool(has_noise),
-        "noise_meta": noise_meta,
-        "n_clusters": int(len(set(labels[labels>=0]))),
-        "features": feats,
-        "predicted": cls,
-        "probs": probs,
-        "severity_score": sev,
-        "severity_breakdown": sev_bd,
-        "angpd": angpd,
-        "ang_proj": ang_proj,
-        "ang_proj_kpis": ang_proj_kpis,
-        "fa_profile": fa_profile,
-        "fa_kpis": fa_kpis,
-        "kpis": kpi_block,
+    result.update({
         "rule_pd": rule_summary,
         "s5_min_frac": s5_min_frac,
         "s3_eps": s3_eps,
@@ -1116,9 +1121,6 @@ def process_prpd(path: Path, out_root: Path, force_phase_offsets=None, fast_mode
         "qty_deciles_meta": qty_dec_meta,
         "qty_quintiles_meta": qty_quint_meta,
         "ann_features": build_ann_feature_vector({"kpis": kpi_block}),
-    }
+    })
 
-
-
-
-
+    return result

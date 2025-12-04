@@ -601,16 +601,22 @@ class PRPDWindow(QMainWindow):
             count_norm = count
 
         ax.clear()
-        ax.plot(phase, max_amp_plot, marker="o", linestyle="none", alpha=0.4, label="Max amp por bin")
+        cmap = plt.get_cmap("plasma")
+        bin_width = float(np.mean(np.diff(phase))) if phase.size > 1 else 6.0
+        colors = cmap(np.clip(count_norm if count_norm.size else np.zeros_like(max_amp_plot), 0, 1))
+        try:
+            ax.bar(phase, max_amp_plot, width=bin_width * 0.9, color=colors, alpha=0.35, edgecolor="none", label="Max amp por bin")
+        except Exception:
+            ax.plot(phase, max_amp_plot, marker="o", linestyle="none", alpha=0.4, color="#2a7bbd", label="Max amp por bin")
         if max_smooth.size:
-            ax.plot(phase, max_smooth, linestyle="-", linewidth=2.0, label="Envolvente suavizada")
+            ax.plot(phase, max_smooth, linestyle="-", linewidth=2.4, color="#ff7f0e", label="Envolvente suavizada")
         ax.set_xlabel("Fase (°)")
         ax.set_ylabel("Amplitud (sensor)")
         ax.set_xlim(0, 360)
         ax.grid(True, alpha=0.3)
 
         ax2 = ax.twinx()
-        ax2.fill_between(phase, 0, count_norm, alpha=0.15, step="mid", label="Conteo (norm)")
+        ax2.fill_between(phase, 0, count_norm, alpha=0.15, step="mid", color="#1f77b4", label="Conteo (norm)")
         ax2.set_ylabel("Conteo normalizado")
 
         lines, labels = ax.get_legend_handles_labels()
@@ -715,8 +721,13 @@ class PRPDWindow(QMainWindow):
         self.ax_raw.set_ylabel("Amplitud")
 
         # Proyección de fase (derecha arriba)
-        self.ax_filtered.plot(phase_x, phase_pos, label="P_ph+ (norm)", color="#1f77b4")
-        self.ax_filtered.plot(phase_x, phase_neg, label="P_ph- (norm)", color="#d62728")
+        self.ax_filtered.plot(phase_x, phase_pos, label="P_ph+ (norm)", color="#1f77b4", linewidth=2.2)
+        self.ax_filtered.plot(phase_x, phase_neg, label="P_ph- (norm)", color="#d62728", linewidth=2.2)
+        try:
+            self.ax_filtered.fill_between(phase_x, 0, phase_pos, color="#1f77b4", alpha=0.1)
+            self.ax_filtered.fill_between(phase_x, 0, phase_neg, color="#d62728", alpha=0.1)
+        except Exception:
+            pass
         self.ax_filtered.set_xlim(0, 360)
         self.ax_filtered.set_xlabel("Fase (°)")
         self.ax_filtered.set_ylabel("Densidad (norm.)")
@@ -728,8 +739,13 @@ class PRPDWindow(QMainWindow):
             pass
 
         # Proyección de amplitud (derecha abajo)
-        self.ax_probs.plot(amp_x, amp_pos, label="P_a+ (norm)", color="#2ca02c")
-        self.ax_probs.plot(amp_x, amp_neg, label="P_a- (norm)", color="#ff7f0e")
+        self.ax_probs.plot(amp_x, amp_pos, label="P_a+ (norm)", color="#2ca02c", linewidth=2.2)
+        self.ax_probs.plot(amp_x, amp_neg, label="P_a- (norm)", color="#ff7f0e", linewidth=2.2)
+        try:
+            self.ax_probs.fill_between(amp_x, 0, amp_pos, color="#2ca02c", alpha=0.12)
+            self.ax_probs.fill_between(amp_x, 0, amp_neg, color="#ff7f0e", alpha=0.12)
+        except Exception:
+            pass
         self.ax_probs.set_xlabel("Amplitud")
         self.ax_probs.set_ylabel("Densidad (norm.)")
         self.ax_probs.set_title("Proyección amplitud (ANGPD 2.0)")
@@ -753,6 +769,114 @@ class PRPDWindow(QMainWindow):
             self.ax_text.text(0.05, y, ln, fontsize=11, transform=self.ax_text.transAxes, ha="left")
             y -= 0.1
         self.ax_text.set_title("ANGPD avanzado – KPIs", loc="left")
+
+    def _draw_angpd_combined(self, r: dict, ph_al: np.ndarray, amp_al: np.ndarray, clouds_s3: list[dict]) -> None:
+        """Vista combinada: nubes S3 + proyección fase/amp y KPIs de ANGPD 2.0."""
+        self._restore_standard_axes()
+        for ax in (self.ax_raw, self.ax_filtered, self.ax_probs):
+            ax.set_visible(True)
+            ax.set_axis_on()
+            ax.clear()
+        self.ax_text.set_visible(True)
+        self.ax_text.set_axis_on()
+        self.ax_text.clear()
+
+        ang_proj = r.get("ang_proj") if isinstance(r, dict) else None
+        kpis = r.get("ang_proj_kpis") if isinstance(r, dict) else {}
+        if not ang_proj:
+            for ax in (self.ax_raw, self.ax_filtered, self.ax_probs, self.ax_text):
+                ax.text(0.5, 0.5, "ANGPD avanzado no disponible", ha="center", va="center")
+                ax.set_axis_off()
+            return
+
+        # Nubes S3 con centros
+        if ph_al.size and amp_al.size:
+            PRPDWindow._plot_clusters_on_ax(self.ax_raw, ph_al, amp_al, clouds_s3,
+                                            title='Nubes crudas (S3) + centros',
+                                            color_points=True,
+                                            include_k=True,
+                                            max_labels=10)
+            self.ax_raw.set_xlim(0, 360)
+            self._apply_auto_ylim(self.ax_raw, amp_al)
+        else:
+            self.ax_raw.text(0.5, 0.5, "Sin PRPD alineado", ha="center", va="center")
+            self.ax_raw.set_axis_off()
+
+        # Proyecciones fase/amplitud (como ANGPD avanzado)
+        n_points = int(ang_proj.get("n_points", 64))
+        phase_x = np.linspace(0.0, 360.0, n_points)
+        amp_min = float(ang_proj.get("amp_min", 0.0))
+        amp_max = float(ang_proj.get("amp_max", 1.0))
+        amp_x = np.linspace(amp_min, amp_max, n_points)
+        phase_pos = np.asarray(ang_proj.get("phase_pos", []), dtype=float)
+        phase_neg = np.asarray(ang_proj.get("phase_neg", []), dtype=float)
+        amp_pos = np.asarray(ang_proj.get("amp_pos", []), dtype=float)
+        amp_neg = np.asarray(ang_proj.get("amp_neg", []), dtype=float)
+
+        # Bins re-muestreo
+        try:
+            bins_text = self.cmb_hist_bins.currentText()
+            bins_num = int(bins_text.split()[0])
+            target_phase = np.linspace(0.0, 360.0, bins_num)
+            target_amp = np.linspace(amp_min, amp_max, bins_num)
+            if phase_pos.size:
+                phase_pos = np.interp(target_phase, phase_x, phase_pos)
+                phase_neg = np.interp(target_phase, phase_x, phase_neg)
+                phase_x = target_phase
+            if amp_pos.size:
+                amp_pos = np.interp(target_amp, amp_x, amp_pos)
+                amp_neg = np.interp(target_amp, amp_x, amp_neg)
+                amp_x = target_amp
+        except Exception:
+            pass
+
+        self.ax_filtered.plot(phase_x, phase_pos, label="P_ph+ (norm)", color="#1f77b4", linewidth=2.2)
+        self.ax_filtered.plot(phase_x, phase_neg, label="P_ph- (norm)", color="#d62728", linewidth=2.2)
+        try:
+            self.ax_filtered.fill_between(phase_x, 0, phase_pos, color="#1f77b4", alpha=0.12)
+            self.ax_filtered.fill_between(phase_x, 0, phase_neg, color="#d62728", alpha=0.12)
+        except Exception:
+            pass
+        self.ax_filtered.set_xlim(0, 360)
+        self.ax_filtered.set_xlabel("Fase (°)")
+        self.ax_filtered.set_ylabel("Densidad (norm.)")
+        self.ax_filtered.set_title("Proyección fase (ANGPD 2.0)")
+        self.ax_filtered.grid(True, alpha=0.2)
+        try:
+            self.ax_filtered.legend(loc="upper right", fontsize=8)
+        except Exception:
+            pass
+
+        self.ax_probs.plot(amp_x, amp_pos, label="P_a+ (norm)", color="#2ca02c", linewidth=2.2)
+        self.ax_probs.plot(amp_x, amp_neg, label="P_a- (norm)", color="#ff7f0e", linewidth=2.2)
+        try:
+            self.ax_probs.fill_between(amp_x, 0, amp_pos, color="#2ca02c", alpha=0.12)
+            self.ax_probs.fill_between(amp_x, 0, amp_neg, color="#ff7f0e", alpha=0.12)
+        except Exception:
+            pass
+        self.ax_probs.set_xlabel("Amplitud")
+        self.ax_probs.set_ylabel("Densidad (norm.)")
+        self.ax_probs.set_title("Proyección amplitud (ANGPD 2.0)")
+        self.ax_probs.grid(True, alpha=0.2)
+        try:
+            self.ax_probs.legend(loc="upper right", fontsize=8)
+        except Exception:
+            pass
+
+        # KPI texto
+        self.ax_text.set_axis_off()
+        lines = [
+            f"phase_width = {kpis.get('phase_width_deg', 0):.1f}°",
+            f"phase_sym   = {kpis.get('phase_symmetry', 0):.2f}",
+            f"phase_peaks = {kpis.get('phase_peaks', 0)}",
+            f"amp_conc    = {kpis.get('amp_concentration', 0):.2f}",
+            f"amp_peaks   = {kpis.get('amp_peaks', 0)}",
+        ]
+        y = 0.9
+        for ln in lines:
+            self.ax_text.text(0.05, y, ln, fontsize=11, transform=self.ax_text.transAxes, ha="left")
+            y -= 0.1
+        self.ax_text.set_title("ANGPD combinado – KPIs", loc="left")
 
     def _ensure_conclusion_axis(self):
         """Devuelve el eje que ocupa todo el rectángulo inferior."""
@@ -2227,11 +2351,21 @@ class PRPDWindow(QMainWindow):
 
         ax_top = self.ax_raw
         ax_top.set_visible(True)
+        def _fmt(val, decimals=2):
+            try:
+                if val is None:
+                    return "N/D"
+                if isinstance(val, str):
+                    return val
+                return f"{float(val):.{decimals}f}"
+            except Exception:
+                return "N/D"
+
         txt_lines = ["KPI avanzados", ""]
         if hist_kpi:
             txt_lines.append("Histogramas (N=16):")
             for k, v in hist_kpi.items():
-                txt_lines.append(f" - {k}: {v}")
+                txt_lines.append(f" • {k}: {_fmt(v, 3)}")
         else:
             txt_lines.append("Sin KPIs de histogramas disponibles.")
         ax_top.text(0.02, 0.98, "\n".join(txt_lines), va="top", ha="left", fontsize=10)
@@ -2241,7 +2375,7 @@ class PRPDWindow(QMainWindow):
         lines2 = ["Metrics advanced (resumen)", ""]
         if isinstance(adv, dict) and adv:
             for k, v in adv.items():
-                lines2.append(f"{k}: {v}")
+                lines2.append(f"{k}: {_fmt(v,3)}")
                 if len(lines2) > 15:
                     break
         else:
@@ -2254,11 +2388,11 @@ class PRPDWindow(QMainWindow):
         lines_ang = ["ANGPD 2.0 (proyecciones)", ""]
         if ang_kpi:
             lines_ang += [
-                f"phase_width: {ang_kpi.get('phase_width_deg','N/D')}",
-                f"phase_sym: {ang_kpi.get('phase_symmetry','N/D')}",
-                f"phase_peaks: {ang_kpi.get('phase_peaks','N/D')}",
-                f"amp_conc: {ang_kpi.get('amp_concentration','N/D')}",
-                f"amp_peaks: {ang_kpi.get('amp_peaks','N/D')}",
+                f"phase_width: {_fmt(ang_kpi.get('phase_width_deg'),1)}",
+                f"phase_sym: {_fmt(ang_kpi.get('phase_symmetry'),3)}",
+                f"phase_peaks: {_fmt(ang_kpi.get('phase_peaks'),0)}",
+                f"amp_conc: {_fmt(ang_kpi.get('amp_concentration'),3)}",
+                f"amp_peaks: {_fmt(ang_kpi.get('amp_peaks'),0)}",
             ]
         else:
             lines_ang.append("Sin ANGPD avanzado.")
@@ -2269,11 +2403,11 @@ class PRPDWindow(QMainWindow):
         lines_fa = ["FA profile", ""]
         if fa_kpi:
             lines_fa += [
-                f"phase_width: {fa_kpi.get('phase_width_deg','N/D')}",
-                f"phase_center: {fa_kpi.get('phase_center_deg','N/D')}",
-                f"symmetry: {fa_kpi.get('symmetry_index','N/D')}",
-                f"conc_index: {fa_kpi.get('ang_amp_concentration_index','N/D')}",
-                f"p95_amp: {fa_kpi.get('p95_amplitude','N/D')}",
+                f"phase_width: {_fmt(fa_kpi.get('phase_width_deg'),1)}",
+                f"phase_center: {_fmt(fa_kpi.get('phase_center_deg'),1)}",
+                f"symmetry: {_fmt(fa_kpi.get('symmetry_index'),3)}",
+                f"conc_index: {_fmt(fa_kpi.get('ang_amp_concentration_index'),3)}",
+                f"p95_amp: {_fmt(fa_kpi.get('p95_amplitude'),1)}",
             ]
         else:
             lines_fa.append("Sin FA KPIs.")
@@ -2824,22 +2958,25 @@ class PRPDWindow(QMainWindow):
             # Fallback si todo está en cero
             if not any(values):
                 inferred = (summary.get("pd_type") or "").lower()
-                if "superficial" in inferred or "tracking" in inferred:
-                    if "superficial" in bar_keys:
-                        values[bar_keys.index("superficial")] = 1.0
-                elif "corona" in inferred:
+                if ("superficial" in inferred or "tracking" in inferred) and ("superficial_tracking" in bar_keys):
+                    values[bar_keys.index("superficial_tracking")] = 1.0
+                elif "corona" in inferred and ("corona" in bar_keys):
                     values[bar_keys.index("corona")] = 1.0
-                elif "cavidad" in inferred:
-                    if "cavidad" in bar_keys:
-                        values[bar_keys.index("cavidad")] = 1.0
+                elif "cavidad" in inferred and ("cavidad_interna" in bar_keys):
+                    values[bar_keys.index("cavidad_interna")] = 1.0
+                elif "flotante" in inferred and ("flotante" in bar_keys):
+                    values[bar_keys.index("flotante")] = 1.0
+                elif "ruido" in bar_keys:
+                    values[bar_keys.index("ruido_baja" if "ruido_baja" in bar_keys else "ruido")] = 0.5
                 else:
-                    if "ruido" in bar_keys:
-                        values[bar_keys.index("ruido")] = 0.5
-
+                    # Repartir un epsilon para que todas las barras se vean
+                    values = [0.01 for _ in bar_keys]
             values = [max(0.0, float(v)) for v in values]
             total = sum(values)
             if total <= 0:
-                total = 1.0
+                # repartir uniformemente
+                values = [1.0 for _ in bar_keys]
+                total = sum(values)
             values = [min(1.0, max(0.0, v / total)) for v in values]
             try:
                 self._last_ann_probs = {k: v for k, v in zip(bar_keys, values)}
@@ -3156,6 +3293,7 @@ class PRPDWindow(QMainWindow):
         is_gap_full = view_mode.startswith("gap-time") and not is_gap_ext
         is_kpi_adv = view_mode.startswith("kpi avanzados")
         is_fa_profile = view_mode.startswith("fa profile")
+        is_angpd_combined = view_mode.startswith("angpd combinado")
 
         text, payload = self._get_conclusion_insight(r)
         payload = payload or {}
@@ -3199,6 +3337,19 @@ class PRPDWindow(QMainWindow):
             ph_al = np.asarray(r.get("aligned", {}).get("phase_deg", []), dtype=float)
             amp_al = np.asarray(r.get("aligned", {}).get("amplitude", []), dtype=float)
             self._draw_fa_profile_view(r, ph_al, amp_al)
+            self.canvas.draw_idle()
+            return
+        if is_angpd_combined:
+            ph_al = np.asarray(r.get("aligned", {}).get("phase_deg", []), dtype=float)
+            amp_al = np.asarray(r.get("aligned", {}).get("amplitude", []), dtype=float)
+            centers_for_combined = None
+            try:
+                centers_for_combined = self._build_cluster_variants(ph_al, amp_al, current_filter=self._get_filter_label())[1]
+                if not self.chk_centers_combined.isChecked():
+                    centers_for_combined = None
+            except Exception:
+                centers_for_combined = None
+            self._draw_angpd_combined(r, ph_al, amp_al, centers_for_combined)
             self.canvas.draw_idle()
             return
         if is_fa_profile:
@@ -3400,6 +3551,9 @@ class PRPDWindow(QMainWindow):
                 self.ax_probs.text(0.5, 0.5, "Sin quantity en XML", ha="center", va="center")
                 self.ax_probs.set_xticks([])
                 self.ax_probs.set_yticks([])
+        elif view_mode.startswith("angpd combinado"):
+            centers_for_combined = selected_s3 if self.chk_centers_combined.isChecked() else None
+            self._draw_angpd_combined(r, ph_al, amp_al, centers_for_combined)
         elif view_mode.startswith("angpd avanzado"):
             # Nueva vista de proyecciones ANGPD 2.0 (fase/amplitud)
             self._draw_angpd_advanced(r)
@@ -3828,17 +3982,23 @@ class PRPDWindow(QMainWindow):
         if total <= 0:
             # fallback con summary
             inferred = (summary.get("pd_type") or "").lower()
-            if "superficial" in inferred or "tracking" in inferred:
-                values[bar_keys.index("superficial")] = 1.0
-            elif "corona" in inferred:
+            if ("superficial" in inferred or "tracking" in inferred) and ("superficial_tracking" in bar_keys):
+                values[bar_keys.index("superficial_tracking")] = 1.0
+            elif "corona" in inferred and ("corona" in bar_keys):
                 values[bar_keys.index("corona")] = 1.0
-            elif "cavidad" in inferred:
-                values[bar_keys.index("cavidad")] = 1.0
+            elif "cavidad" in inferred and ("cavidad_interna" in bar_keys):
+                values[bar_keys.index("cavidad_interna")] = 1.0
+            elif "flotante" in inferred and ("flotante" in bar_keys):
+                values[bar_keys.index("flotante")] = 1.0
+            elif "ruido_baja" in bar_keys:
+                values[bar_keys.index("ruido_baja")] = 0.5
             else:
-                values[bar_keys.index("ruido")] = 0.5
+                # repartir un epsilon para que no quede vacio
+                values = [0.01 for _ in bar_keys]
             total = sum(values)
         if total <= 0:
-            total = 1.0
+            values = [1.0 for _ in bar_keys]
+            total = sum(values)
         values = [min(1.0, max(0.0, v / total)) for v in values]
 
         fig, ax = _plt.subplots(figsize=(7.5, 4.0), dpi=130)

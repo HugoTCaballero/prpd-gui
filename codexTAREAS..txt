@@ -1,0 +1,288 @@
+Guía completa para integrar clasificación y KPIs en la GUI PRPD
+
+Esta guía explica paso a paso cómo extender la aplicación gráfica PRPD para calcular nuevos indicadores (KPI), incorporarlos en la interfaz y construir la base para una futura clasificación automática de descargas parciales en transformadores sumergidos en aceite. NO incluye todavía la integración de la red neuronal; eso se abordará al final. Se describen los datos de entrada, cómo se generan los valores y cómo se muestran en la interfaz.
+
+1. Contexto actual
+
+Actualmente la GUI PRPD muestra:
+
+Histograma de distribución de fase y amplitud (ANGPD / N-ANGPD): 16 bins para fase y amplitud, representando la energía de las descargas.
+
+Histograma de fase y amplitud por semicírculo.
+
+Serie temporal de gap-time: se calculan percentiles P50 y P5 y se muestran recomendaciones en función del nivel de severidad.
+
+Tabla de KPIs: indicadores como total de pulsos útiles, anchura de fase, centro de fase, número de picos, P95 de amplitud, gap-time P50, gap-time P5 y relación N-ANGPD/ANGPD.
+
+Gráfico de barras “ANN Predicted PD Source”: tres barras (Corona ±, Superficial/Tracking y Cavidad) que actualmente no reflejan un modelo real.
+
+Limitaciones
+
+Solo se reconocen tres tipos de DP.
+
+La ANN no está integrada ni entrenada.
+
+Faltan indicadores más profundos como skewness, kurtosis, correlación de fase, etc.
+
+2. Nuevas categorías de DP
+
+Para transformadores sumergidos en aceite consideraremos al menos cinco categorías:
+
+Cavidad (Void): descargas internas en cavidades o huecos.
+
+Superficial / Tracking: descargas sobre la superficie del aislante.
+
+Corona (Corona ±): descargas puntuales cercanas a electrodos, se pueden separar por polaridad.
+
+Flotante (Floating): descargas debidas a electrodos flotantes o malas conexiones.
+
+Suspendida (Suspended): descargas provocadas por partículas suspendidas en el aceite.
+
+Ruido (Noise): señales no asociadas a DP o interferencias.
+
+Nota: Las tres primeras clases ya aparecen en la GUI. Las nuevas se añadirán en fases posteriores.
+
+3. Visión general de datos de entrada
+
+Los datos procesados vienen encapsulados en un diccionario result que contiene:
+
+aligned["phase_deg"]: vectores de fase (0–360°) de cada pulso detectado.
+
+aligned["amplitude"]: amplitud de cada pulso (en magnitudes eléctricas o normalizadas).
+
+aligned["quantity"]: magnitud o peso de cada pulso.
+
+Estos vectores se utilizan para construir los histogramas de fase y amplitud y todos los indicadores derivados.
+
+4. Cálculo de histogramas
+4.1 Histograma 2D ANGPD / N-ANGPD
+
+Se divide la fase y la amplitud en bins; por ejemplo 32 para fase y 32 para amplitud. Cada bin acumula la suma de quantity de los pulsos que caen en esa ventana.
+
+def compute_histogram_2d(amplitude, phase, quantity, bins_amp=32, bins_phase=32):
+    # Convertir fase a rango [0, 360)
+    phase = phase % 360
+    # Histograma 2D ponderado por cantidad
+    hist, amp_edges, ph_edges = np.histogram2d(
+        amplitude, phase, bins=[bins_amp, bins_phase], weights=quantity
+    )
+    # Normalización N-ANGPD (max=1)
+    n_angpd = hist / np.max(hist) if np.max(hist) > 0 else hist
+    # Normalización ANGPD (sum=1)
+    angpd = hist / np.sum(hist) if np.sum(hist) > 0 else hist
+    return n_angpd, angpd, amp_edges, ph_edges
+
+N-ANGPD se utiliza para representar la forma relativa (máximo igual a 1).
+
+ANGPD se utiliza para métricas de severidad (sumatoria igual a 1), permitiendo comparaciones entre casos con diferente número de pulsos.
+
+4.2 Histogramas de fase y amplitud individuales
+
+Los histogramas de fase (por semicírculo) y de amplitud (por polaridad) se derivan de hist:
+# Para la mitad positiva y negativa
+pos_hist = np.sum(hist[:, :bins_phase//2], axis=0)  # Fase 0–180°
+neg_hist = np.sum(hist[:, bins_phase//2:], axis=0)  # Fase 180–360°
+# Normalizar
+pos_hist_norm = pos_hist / np.max(pos_hist)
+neg_hist_norm = neg_hist / np.max(neg_hist)
+Estos histogramas se muestran en los gráficos de la interfaz.
+5. Cálculo de KPIs ampliados
+5.1 Skewness y kurtosis
+
+Se calcula la asimetría (skewness) y la curtosis (kurtosis) de la distribución de las fases, ponderando por quantity, para las mitades positiva y negativa.
+from scipy.stats import skew, kurtosis
+
+def phase_stats(phases, quantity):
+    # Separar en positivo (0–180) y negativo (180–360)
+    pos_mask = (phases % 360) < 180
+    neg_mask = ~pos_mask
+    # Ponderar fases por cantidad
+    pos_skew = skew(phases[pos_mask], weights=quantity[pos_mask])
+    pos_kurt = kurtosis(phases[pos_mask], weights=quantity[pos_mask])
+    neg_skew = skew(phases[neg_mask], weights=quantity[neg_mask])
+    neg_kurt = kurtosis(phases[neg_mask], weights=quantity[neg_mask])
+    return {
+        'pos_skew': pos_skew,
+        'pos_kurt': pos_kurt,
+        'neg_skew': neg_skew,
+        'neg_kurt': neg_kurt,
+    }
+
+5.2 Número de picos locales
+Para cada mitad de fase, se calcula el número de picos locales en la distribución de fase. Un pico local es un punto en el histograma donde la altura es mayor que sus vecinos inmediatos.
+
+from scipy.signal import find_peaks
+
+def count_phase_peaks(hist_phase):
+    # Detección de picos en histograma normalizado
+    peaks, _ = find_peaks(hist_phase)
+    return len(peaks)
+5.3 Correlación entre hemisferios
+
+Se calcula el coeficiente de correlación entre los histogramas de fase positivo y negativo para comparar la simetría de la distribución.
+
+def phase_correlation(pos_hist, neg_hist):
+    # Asegurarse de que tengan la misma longitud
+    corr = np.corrcoef(pos_hist, neg_hist)[0, 1]
+    return corr
+5.4 Mediana y P95 de fase y amplitud
+
+La mediana de fase indica dónde se concentran la mayoría de los pulsos en cada semicírculo. El percentil 95 (P95) de la amplitud refleja el valor máximo de amplitud descartando valores atípicos.
+
+def median_and_p95(phases, amplitude, quantity):
+    # Calcular mediana ponderada de fase por semicírculo
+    pos_mask = (phases % 360) < 180
+    neg_mask = ~pos_mask
+    def weighted_percentile(data, weights, percentile):
+        sorter = np.argsort(data)
+        data, weights = data[sorter], weights[sorter]
+        cumsum = np.cumsum(weights)
+        cutoff = percentile / 100.0 * cumsum[-1]
+        return data[cumsum >= cutoff][0]
+    median_pos = weighted_percentile(phases[pos_mask], quantity[pos_mask], 50)
+    median_neg = weighted_percentile(phases[neg_mask], quantity[neg_mask], 50)
+    # Percentil 95 de amplitud
+    p95_amp = np.percentile(amplitude, 95)
+    return {
+        'median_pos_phase': median_pos,
+        'median_neg_phase': median_neg,
+        'p95_amp': p95_amp,
+    }
+5.5 Relación N‑ANGPD/ANGPD
+
+Ya se calcula en la versión actual: se divide el valor máximo del histograma normalizado por el valor sumado total. Se conserva como indicador de severidad.
+
+6. Integración de KPIs en la GUI
+6.1 Estructura de datos
+
+Crear un campo result['metrics'] con todas las métricas calculadas. Por ejemplo:
+
+result['metrics'] = {
+    'skewness': phase_stats_dict,
+    'num_peaks': {
+        'pos': count_phase_peaks(pos_hist),
+        'neg': count_phase_peaks(neg_hist),
+    },
+    'phase_corr': phase_correlation(pos_hist, neg_hist),
+    'phase_medians_p95': median_and_p95(result['aligned']['phase_deg'], result['aligned']['amplitude'], result['aligned']['quantity']),
+    'pulses_ratio': np.sum(result['aligned']['quantity'][pos_mask]) / np.sum(result['aligned']['quantity'][neg_mask]),
+    'nan_gpd_ratio': nan_gpd_ratio,
+    # ... incluir otros KPIs
+}
+
+6.2 Visualización en la tabla de KPIs
+
+Modificar el cuadro de “Resultados de los principales KPI” para incluir nuevas filas. Por ejemplo:
+
+Indicador	Total	Semicíclo +	Semicíclo –
+Skewness (fase)	x.x	x.x	x.x
+Kurtosis (fase)	x.x	x.x	x.x
+Correlación fases	x.x	—	—
+Mediana de fase	—	60.8°	234.6°
+P95 amplitud	16.1	15.8	16.5
+
+Esto permite que los usuarios observen de inmediato la asimetría y dispersión de las descargas.
+
+6.3 Vista de conclusiones
+
+Mantener la sección “Seguimiento y criticidad”.
+
+Añadir un subpanel “Indicadores avanzados” donde se resuman skewness, kurtosis y correlación.
+
+Continuar mostrando P50, P5 y relación N‑ANGPD/ANGPD para decidir la severidad.
+
+7. Clasificación sin ANN (reglas basadas en KPIs)
+
+Mientras no se integre la ANN, se puede hacer una clasificación preliminar basada en reglas simples tomadas de la literatura.
+
+7.1 Criterios propuestos
+
+Cavidad/void: concentración de pulsos antes del pico de tensión; mediana de fase < 90° en positivo y > 270° en negativo. N‑ANGPD/ANGPD suele ser elevado.
+
+Superficial/tracking: pulsos distribuidos simétricamente en ambas mitades; skewness cercano a 0; correlación alta; anchura de fase moderada.
+
+Corona: pulsos concentrados al inicio de cada semicírculo con amplitud baja; pocos picos; alta relación N‑ANGPD/ANGPD.
+
+Flotante: gran dispersión en fase y amplitud; kurtosis baja; presencia de picos aislados.
+
+Suspendida: pulsos esporádicos en ambos semicírculos; gap-time grande; distribución similar a ruido.
+
+Ruido: pocas descargas significativas; histogramas muy planos; gap-time extenso.
+
+7.2 Implementación de las reglas
+
+Crear una función que reciba las métricas y devuelva un dict de probabilidad heurística para cada clase. Ejemplo simplificado:
+def rule_based_classifier(metrics):
+    scores = {cls: 0.0 for cls in CLASSES}
+    # Criterio cavidad
+    if metrics['phase_medians_p95']['median_pos_phase'] < 90 and metrics['phase_medians_p95']['median_neg_phase'] > 270:
+        scores['cavidad'] += 1
+    # Criterio superficial
+    if abs(metrics['skewness']['pos_skew']) < 0.5 and abs(metrics['skewness']['neg_skew']) < 0.5:
+        scores['superficial'] += 1
+    # Criterio corona
+    if metrics['num_peaks']['pos'] <= 1 and metrics['p95_amp'] < threshold_amp:
+        scores['corona'] += 1
+    # Criterio flotante
+    if metrics['kurtosis']['pos_kurt'] < 0 and metrics['kurtosis']['neg_kurt'] < 0:
+        scores['flotante'] += 1
+    # Criterio suspendida/ruido
+    if metrics['pulses_ratio'] ~ 1 and metrics['phase_corr'] < 0.2:
+        scores['suspendida'] += 1
+    # Normalizar a probabilidades
+    total = sum(scores.values()) or 1
+    probs = {cls: s/total for cls, s in scores.items()}
+    return probs
+7.3 Uso en la interfaz
+
+Alimentar el resultado de esta función al gráfico de barras “ANN Predicted PD Source”.
+
+Mostrar la clase con mayor probabilidad como “Predicción dominante”.
+
+Esto servirá como placeholder hasta entrenar la ANN real.
+
+8. Mantenimiento de la gráfica ANN Predicted PD Source
+
+No se elimina el gráfico. Se actualiza para:
+
+Mostrar hasta seis barras (cavidad, superficial, corona, flotante, suspendida, ruido).
+
+Colores diferenciados por clase (por ejemplo: cavidad azul, superficial verde, corona amarillo, flotante naranja, suspendida rojo, ruido gris).
+
+Un texto debajo indicando la “Predicción dominante” basado en el mayor valor.
+
+Hasta que la ANN esté lista, usar el clasificador heurístico como se describió.
+
+9. Conexión entre datos, KPIs y vistas
+
+A continuación se muestra cómo fluye la información:
+
+Datos crudos (phase_deg, amplitude, quantity).
+
+Preprocesamiento: cálculo de histogramas ANGPD y N‑ANGPD.
+
+KPIs básicos: número de pulsos útiles, anchura de fase, centro de fase, P95 amplitud, gap-time P50 y P5.
+
+KPIs avanzados: skewness, kurtosis, número de picos, correlación de hemisferios, mediana de fase, relación de pulsos, relación N‑ANGPD/ANGPD.
+
+Clasificación heurística: reglas basadas en KPIs para predecir la categoría.
+
+Visualización:
+
+Gráficos: histograma, gap-time, gráfico de barras de clase.
+
+Tabla de KPIs: presenta valores básicos y avanzados.
+
+Resumen y recomendaciones: se basan en gap-time y clase dominante.
+
+10. Sugerencias para futuras mejoras y ANN
+
+Después de validar los KPIs avanzados, entrenar una red neuronal con entradas basadas en histogramas y métricas calculadas. Esto se deberá hacer en otra fase.
+
+Ajustar los bins de fase y amplitud según se obtengan más datos para optimizar la discriminación entre clases.
+
+Revisar las reglas heurísticas con datos reales y ajustes de umbrales.
+
+11. Conclusión
+
+Esta guía establece una ruta clara para ampliar la funcionalidad de la GUI PRPD, incorporando nuevos indicadores, un clasificador basado en reglas y preparando el terreno para una ANN futura. Las instrucciones detallan cómo calcular cada KPI, dónde proviene la información y cómo se muestra en la interfaz, asegurando coherencia y un flujo de datos claro de extremo a extremo.

@@ -109,13 +109,16 @@ def render_conclusions(wnd, result: dict, payload: dict | None = None) -> None:
         text = wnd.last_conclusion_text
 
     summary = payload.get("summary", {}) if isinstance(payload, dict) else {}
+    if summary is None:
+        summary = {}
     rule_pd = result.get("rule_pd", {}) if isinstance(result, dict) else {}
+    if rule_pd is None:
+        rule_pd = {}
     metrics = payload.get("metrics", {}) if isinstance(payload, dict) else {}
     metrics_adv = payload.get("metrics_advanced", {}) if isinstance(payload, dict) else {}
     if not metrics_adv:
         metrics_adv = result.get("metrics_advanced", {})
     kpis = result.get("kpis", {}) if isinstance(result, dict) else {}
-    fa_kpis = result.get("fa_kpis", {}) if isinstance(result, dict) else {}
     fa_kpis = result.get("fa_kpis", {}) if isinstance(result, dict) else {}
     manual = wnd.manual_override if getattr(wnd, "manual_override", {}).get("enabled") else None
     gap_stats = payload.get("gap") if isinstance(payload, dict) else None
@@ -449,6 +452,7 @@ def render_conclusions(wnd, result: dict, payload: dict | None = None) -> None:
     lifetime_band = rule_pd.get("lifetime_band")
     lifetime_text = rule_pd.get("lifetime_text")
     actions = rule_pd.get("actions") or []
+    explanation = rule_pd.get("explanation") or []
 
     # Bloque de encabezado en right card
     hdr_y = wnd._draw_section_title(right_ax, "Diagnóstico", y=0.96)
@@ -480,6 +484,15 @@ def render_conclusions(wnd, result: dict, payload: dict | None = None) -> None:
             right_ax.text(0.03, y_act, f"• {act}", fontsize=9, ha="left")
             y_act -= 0.06
         hdr_y = y_act - 0.02
+
+    # Explicación resumida
+    if explanation:
+        hdr_y = wnd._draw_section_title(right_ax, "Resumen de reglas", y=hdr_y - 0.02)
+        y_exp = hdr_y - 0.04
+        for line in explanation[:4]:
+            right_ax.text(0.03, y_exp, f"- {line}", fontsize=9, ha="left", wrap=True)
+            y_exp -= 0.055
+        hdr_y = y_exp - 0.02
 
     risk_key = risk_label.lower() if isinstance(risk_label, str) else ""
     estado_map = {

@@ -147,6 +147,7 @@ def build_bottom_area(wnd):
         "ANGPD avanzado",
         "KPI avanzados",
         "FA profile",
+        "ANGPD combinado",
         "Combinada",
         "Nubes",
         "Manual",
