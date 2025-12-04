@@ -601,7 +601,26 @@ class PRPDWindow(QMainWindow):
             count_norm = count
 
         ax.clear()
-        ax.plot(phase, max_amp_plot, marker="o", linestyle="none", alpha=0.4, label="Max amp por bin")
+        # Intentar colorear por quintiles si existen en aligned
+        quint_idx = None
+        try:
+            quint_idx = np.asarray(result.get("aligned", {}).get("qty_quintiles", []), dtype=float)
+        except Exception:
+            quint_idx = None
+        color_map = {
+            1: "#0066CC",
+            2: "#009900",
+            3: "#FFCC00",
+            4: "#FF8000",
+            5: "#CC0000",
+        }
+        if quint_idx is not None and quint_idx.size and quint_idx.size == phase.size:
+            for q in range(1, 6):
+                mask = quint_idx == q
+                if mask.any():
+                    ax.scatter(phase[mask], max_amp_plot[mask], s=26, alpha=0.7, color=color_map.get(q, "#888888"), edgecolors="none", label=f"Q{q}")
+        else:
+            ax.plot(phase, max_amp_plot, marker="o", linestyle="none", alpha=0.4, label="Max amp por bin")
         if max_smooth.size:
             ax.plot(phase, max_smooth, linestyle="-", linewidth=2.0, label="Envolvente suavizada")
         ax.set_xlabel("Fase (°)")
@@ -685,12 +704,42 @@ class PRPDWindow(QMainWindow):
         phase_neg = np.asarray(ang_proj.get("phase_neg", []), dtype=float)
         amp_pos = np.asarray(ang_proj.get("amp_pos", []), dtype=float)
         amp_neg = np.asarray(ang_proj.get("amp_neg", []), dtype=float)
+        # Re-muestrear a bins seleccionados (combo Bins) para la visualización
+        try:
+            bins_text = self.cmb_hist_bins.currentText()
+            bins_num = int(bins_text.split()[0])
+            target_phase = np.linspace(0.0, 360.0, bins_num)
+            target_amp = np.linspace(amp_min, amp_max, bins_num)
+            phase_pos = np.interp(target_phase, phase_x, phase_pos) if phase_pos.size else phase_pos
+            phase_neg = np.interp(target_phase, phase_x, phase_neg) if phase_neg.size else phase_neg
+            amp_pos = np.interp(target_amp, amp_x, amp_pos) if amp_pos.size else amp_pos
+            amp_neg = np.interp(target_amp, amp_x, amp_neg) if amp_neg.size else amp_neg
+            phase_x = target_phase
+            amp_x = target_amp
+        except Exception:
+            pass
 
         # PRPD alineado (izquierda)
         ph_al = np.asarray(aligned.get("phase_deg", []), dtype=float)
         amp_al = np.asarray(aligned.get("amplitude", []), dtype=float)
+        quint_idx = None
+        try:
+            quint_idx = np.asarray(aligned.get("qty_quintiles", []), dtype=float)
+        except Exception:
+            quint_idx = None
         if ph_al.size and amp_al.size:
-            self._draw_prpd_scatter_base(self.ax_raw, r)
+            if quint_idx is not None and quint_idx.size == ph_al.size:
+                quint_colors = {1: "#0066CC", 2: "#009900", 3: "#FFCC00", 4: "#FF8000", 5: "#CC0000"}
+                for q in range(1, 6):
+                    mask = quint_idx == q
+                    if mask.any():
+                        self.ax_raw.scatter(ph_al[mask], amp_al[mask], s=5, alpha=0.5, color=quint_colors.get(q, "#999999"), edgecolors="none", label=f"Q{q}")
+                try:
+                    self.ax_raw.legend(loc="upper right", fontsize=8)
+                except Exception:
+                    pass
+            else:
+                self._draw_prpd_scatter_base(self.ax_raw, r)
             self.ax_raw.set_xlim(0, 360)
             self._apply_auto_ylim(self.ax_raw, amp_al)
         else:
@@ -2201,13 +2250,15 @@ class PRPDWindow(QMainWindow):
 
         metrics = (payload or {}).get("metrics") if isinstance(payload, dict) else None
         if metrics is None:
-            metrics = r.get("kpi", {}) if isinstance(r, dict) else {}
+            metrics = r.get("kpis", {}) if isinstance(r, dict) else {}
         hist_kpi = {}
         try:
-            hist_kpi = r.get("kpi", {}).get("hist", {}) if isinstance(r, dict) else {}
+            hist_kpi = (r.get("kpi", {}) or {}).get("hist", {}) if isinstance(r, dict) else {}
         except Exception:
             hist_kpi = {}
         adv = r.get("metrics_advanced", {}) if isinstance(r, dict) else {}
+        ang_kpi = r.get("ang_proj_kpis", {}) if isinstance(r, dict) else {}
+        fa_kpi = r.get("fa_kpis", {}) if isinstance(r, dict) else {}
 
         ax_top = self.ax_raw
         ax_top.set_visible(True)
@@ -2225,15 +2276,44 @@ class PRPDWindow(QMainWindow):
         lines2 = ["Metrics advanced (resumen)", ""]
         if isinstance(adv, dict) and adv:
             for k, v in adv.items():
-                if isinstance(v, dict):
-                    lines2.append(f"{k}: { {kk: vv for kk,vv in list(v.items())[:5]} }")
-                else:
-                    lines2.append(f"{k}: {v}")
-                if len(lines2) > 18:
+                lines2.append(f"{k}: {v}")
+                if len(lines2) > 15:
                     break
         else:
             lines2.append("Sin metrics_advanced.")
         ax_bottom.text(0.02, 0.98, "\n".join(lines2), va="top", ha="left", fontsize=10)
+
+        # Panel ang_proj_kpis y fa_kpis en ax_probs/ax_text
+        ax_ang = self.ax_probs
+        ax_ang.set_visible(True)
+        lines_ang = ["ANGPD 2.0 (proyecciones)", ""]
+        if ang_kpi:
+            lines_ang += [
+                f"phase_width: {ang_kpi.get('phase_width_deg','N/D')}",
+                f"phase_sym: {ang_kpi.get('phase_symmetry','N/D')}",
+                f"phase_peaks: {ang_kpi.get('phase_peaks','N/D')}",
+                f"amp_conc: {ang_kpi.get('amp_concentration','N/D')}",
+                f"amp_peaks: {ang_kpi.get('amp_peaks','N/D')}",
+            ]
+        else:
+            lines_ang.append("Sin ANGPD avanzado.")
+        ax_ang.text(0.02, 0.98, "\n".join(lines_ang), va="top", ha="left", fontsize=10)
+
+        ax_fa = self.ax_text
+        ax_fa.set_visible(True)
+        lines_fa = ["FA profile", ""]
+        if fa_kpi:
+            lines_fa += [
+                f"phase_width: {fa_kpi.get('phase_width_deg','N/D')}",
+                f"phase_center: {fa_kpi.get('phase_center_deg','N/D')}",
+                f"symmetry: {fa_kpi.get('symmetry_index','N/D')}",
+                f"conc_index: {fa_kpi.get('ang_amp_concentration_index','N/D')}",
+                f"p95_amp: {fa_kpi.get('p95_amplitude','N/D')}",
+            ]
+        else:
+            lines_fa.append("Sin FA KPIs.")
+        ax_fa.text(0.02, 0.98, "\n".join(lines_fa), va="top", ha="left", fontsize=10)
+
         self.canvas.draw_idle()
 
     @staticmethod
