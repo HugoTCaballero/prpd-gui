@@ -50,6 +50,14 @@ PD_LABELS = {
     "ruido_baja": "Ruido / baja severidad",
 }
 
+LOCATION_HINT = {
+    "superficial_tracking": "Superficie de aislamiento e interfaces (pantallas, soportes, conexiones superficiales).",
+    "cavidad_interna": "Interior de devanados, canales de aceite y zonas encapsuladas del aislamiento.",
+    "corona": "Puntas, aristas de conductores, boquillas y elementos expuestos a campo intenso en aire.",
+    "flotante": "Conexiones flojas, partes no aterrizadas o elementos metálicos flotantes dentro del tanque.",
+    "ruido_baja": "Sin indicios claros de defecto localizado (ruido / actividad de muy baja severidad).",
+}
+
 
 def build_rule_features(result: dict) -> dict:
     metrics = result.get("metrics", {}) if isinstance(result, dict) else {}
@@ -176,6 +184,110 @@ def rule_based_scores(features: dict) -> dict:
     return probs
 
 
+def _compute_stage(features: dict) -> str:
+    gap_p5 = _safe(features.get("gap_p5_ms"))
+    ratio = _safe(features.get("n_angpd_angpd_ratio"))
+    pulses = _safe(features.get("total_pulses"))
+    # Etapa base por gap P5
+    if gap_p5 == 0:
+        stage = "no_evaluada"
+    elif gap_p5 < TH_GAP_P5_AVANZADA_MAX:
+        stage = "avanzada"
+    elif gap_p5 < TH_GAP_P5_DESARROLLO_MAX:
+        stage = "en_desarrollo"
+    else:
+        stage = "incipiente"
+    # Ajustes por energía
+    if stage == "incipiente" and ratio > TH_RATIO_NANGPD_RIESGO_ALTO and pulses > TH_PULSES_RIESGO_ALTO:
+        stage = "en_desarrollo"
+    elif stage == "en_desarrollo" and ratio > (TH_RATIO_NANGPD_RIESGO_ALTO * 1.5) and pulses > (TH_PULSES_RIESGO_ALTO * 2):
+        stage = "avanzada"
+    return stage
+
+
+def _compute_severity_index(features: dict) -> float:
+    gap_p5 = _safe(features.get("gap_p5_ms"))
+    ratio = _safe(features.get("n_angpd_angpd_ratio"))
+    pulses = _safe(features.get("total_pulses"))
+    p95 = _safe(features.get("fa_p95_amp") or features.get("p95_global_amp"))
+    # Normalizaciones
+    s_gap = 0.0
+    if gap_p5 > 0:
+        s_gap = max(0.0, min(1.0, (15.0 - gap_p5) / 15.0))
+    s_ratio = max(0.0, min(1.0, ratio / 30.0))
+    s_pulses = max(0.0, min(1.0, pulses / 5000.0))
+    s_p95 = max(0.0, min(1.0, p95))
+    w_gap, w_ratio, w_pulses, w_p95 = 0.4, 0.3, 0.2, 0.1
+    s = (w_gap * s_gap + w_ratio * s_ratio + w_pulses * s_pulses + w_p95 * s_p95) / (w_gap + w_ratio + w_pulses + w_p95)
+    return float(10.0 * s)
+
+
+def _severity_level(sev_idx: float) -> str:
+    if sev_idx < 3.0:
+        return "bajo"
+    elif sev_idx < 6.0:
+        return "medio"
+    return "alto"
+
+
+def _combine_stage_severity(stage: str, severity: str) -> str:
+    if stage == "incipiente":
+        return "bajo" if severity == "bajo" else "medio"
+    if stage == "en_desarrollo":
+        return "alto" if severity == "alto" else "medio"
+    if stage == "avanzada":
+        return "medio" if severity == "bajo" else "alto"
+    return "medio"
+
+
+def _compute_lifetime_score(stage: str, severity_index: float) -> int:
+    stage_score = {"incipiente": 1.0, "en_desarrollo": 2.0, "avanzada": 3.0}.get(stage, 2.0)
+    s_stage = (stage_score - 1.0) / 2.0
+    s_sev = max(0.0, min(1.0, severity_index / 10.0))
+    w_sev, w_stage = 0.7, 0.3
+    damage = w_sev * s_sev + w_stage * s_stage
+    lt = int(round(100.0 * (1.0 - damage)))
+    return max(0, min(100, lt))
+
+
+def _map_lifetime_band(lifetime_score: int) -> tuple[str, str]:
+    if lifetime_score >= 80:
+        return "L1", "Condición buena. Riesgo bajo en los próximos 5 años (si no cambian las condiciones)."
+    if lifetime_score >= 60:
+        return "L2", "Riesgo bajo a moderado en 1–5 años. Recomendable monitoreo periódico."
+    if lifetime_score >= 40:
+        return "L3", "Riesgo moderado. Conviene planear acciones en 1–3 años."
+    if lifetime_score >= 20:
+        return "L4", "Riesgo alto. Recomendada intervención en meses–1 año según criticidad."
+    return "L5", "Riesgo muy alto. Posible evolución en meses o menos; revisar de forma prioritaria."
+
+
+def _recommend_actions(class_id: str, stage: str, severity: str, risk: str) -> list[str]:
+    actions: list[str] = []
+    if risk == "bajo":
+        actions.append("Mantener el monitoreo de DP en paradas y revisiones periódicas.")
+    elif risk == "medio":
+        actions.append("Aumentar frecuencia de monitoreo de DP y correlacionar con DGA y pruebas eléctricas.")
+        actions.append("Planear inspección focalizada de la zona sospechosa en la siguiente ventana de mantenimiento.")
+    elif risk == "alto":
+        actions.append("Evaluar reducción de carga o restricciones mientras se investiga la causa.")
+        actions.append("Programar inspección y pruebas complementarias de forma prioritaria.")
+        actions.append("Considerar estrategias de mitigación o reparación según hallazgos.")
+
+    if class_id == "superficial_tracking":
+        actions.append("Revisar limpieza, humedad y posibles caminos de tracking en superficies y soportes.")
+    elif class_id == "cavidad_interna":
+        actions.append("Correlacionar con DGA, SFRA y pruebas de aislamiento para confirmar defectos internos.")
+        actions.append("Analizar criticidad del activo ante una posible falla interna del aislamiento.")
+    elif class_id == "corona":
+        actions.append("Inspeccionar puntas, aristas y boquillas; revisar distancias de aislamiento y condiciones del aire.")
+    elif class_id == "flotante":
+        actions.append("Verificar conexiones, bornes y partes metálicas flojas o no aterrizadas.")
+    elif class_id == "ruido_baja":
+        actions.append("Confirmar que la señal corresponde a ruido; mantener vigilancia sin sobrerreaccionar.")
+    return actions
+
+
 def infer_pd_summary(features: dict, probs: dict) -> dict:
     """Construye el resumen legible para la GUI a partir de las probabilidades."""
     class_id = max(probs, key=probs.get)
@@ -186,40 +298,28 @@ def infer_pd_summary(features: dict, probs: dict) -> dict:
     ratio = _safe(features.get("n_angpd_angpd_ratio"))
     pulses = _safe(features.get("total_pulses"))
 
-    if gap_p5 < TH_GAP_P5_AVANZADA_MAX:
-        stage = "avanzada"
-        risk = "alto"
-    elif TH_GAP_P5_AVANZADA_MAX <= gap_p5 < TH_GAP_P5_DESARROLLO_MAX:
-        stage = "en desarrollo"
-        risk = "medio"
-    else:
-        stage = "incipiente"
-        risk = "bajo"
+    # Etapa y severidad
+    stage = _compute_stage(features)
+    sev_idx = _compute_severity_index(features)
+    sev_level = _severity_level(sev_idx)
+    risk = _combine_stage_severity(stage, sev_level)
 
-    if ratio > TH_RATIO_NANGPD_RIESGO_ALTO or pulses > TH_PULSES_RIESGO_ALTO:
-        if risk == "medio":
-            risk = "alto"
-        elif risk == "bajo":
-            risk = "medio"
+    # LifeTime
+    lifetime_score = _compute_lifetime_score(stage, sev_idx)
+    lifetime_band, lifetime_text = _map_lifetime_band(lifetime_score)
 
-    if class_id == "superficial_tracking":
-        location = "Superficie de aislamiento e interfaces"
-    elif class_id == "cavidad_interna":
-        location = "Interior de devanados y canales de aceite"
-    elif class_id == "corona":
-        location = "Puntas y aristas de conductores / boquillas"
-    elif class_id == "flotante":
-        location = "Conexiones flojas / elementos flotantes"
-    else:
-        location = "Sin indicios claros de defecto localizado"
+    # Ubicación
+    location = LOCATION_HINT.get(class_id, "Ubicación no determinada")
 
     explanation = [
         f"Clase dominante: {class_label} (prob={probs.get(class_id, 0.0):.2f}).",
-        f"Etapa estimada: {stage}. Riesgo: {risk}.",
+        f"Etapa: {stage}. Severidad: {sev_level} ({sev_idx:.1f}/10).",
         f"Gap-time P50={gap_p50:.1f} ms, P5={gap_p5:.1f} ms.",
         f"Relación N-ANGPD/ANGPD≈{ratio:.1f}, pulsos útiles≈{pulses:.0f}.",
         f"Ubicación probable: {location}.",
     ]
+
+    actions = _recommend_actions(class_id, stage, sev_level, risk)
 
     return {
         "class_id": class_id,
@@ -227,8 +327,17 @@ def infer_pd_summary(features: dict, probs: dict) -> dict:
         "class_probs": probs,
         "classes": list(probs.keys()),
         "ruleset_version": RULESET_VERSION,
+        "dominant_pd": class_label,
+        "location_hint": location,
+        "stage": stage,
+        "severity_level": sev_level,
+        "severity_index": float(sev_idx),
         "stage": stage,
         "risk_level": risk,
+        "lifetime_score": lifetime_score,
+        "lifetime_band": lifetime_band,
+        "lifetime_text": lifetime_text,
+        "actions": actions,
         "location_hint": location,
         "explanation": explanation,
     }
