@@ -562,6 +562,98 @@ class PRPDWindow(QMainWindow):
         setattr(self, attr, twin)
         return twin
 
+    def _draw_prpd_scatter_base(self, ax, result: dict) -> None:
+        """Scatter básico de PRPD alineado (o heatmap si está activo)."""
+        aligned = result.get("aligned", {}) if isinstance(result, dict) else {}
+        ph_al = np.asarray(aligned.get("phase_deg", []), dtype=float)
+        amp_al = np.asarray(aligned.get("amplitude", []), dtype=float)
+        if ph_al.size and amp_al.size:
+            try:
+                if self.chk_hist2d.isChecked():
+                    H2, xe2, ye2 = np.histogram2d(ph_al, amp_al, bins=[72,50], range=[[0,360],[0,100]])
+                    ax.imshow(H2.T + 1e-9, origin='lower', aspect='auto', extent=[xe2[0], xe2[-1], ye2[0], ye2[-1]])
+                ax.scatter(ph_al, amp_al, s=3, alpha=0.5, color="#1f77b4", edgecolors="none")
+            except Exception:
+                ax.scatter(ph_al, amp_al, s=3, alpha=0.5, color="#1f77b4", edgecolors="none")
+
+    # --- Vista FA profile --------------------------------------------------
+    def _draw_fa_profile_left(self, ax, result: dict) -> None:
+        fa_profile = result.get("fa_profile") if isinstance(result, dict) else None
+        if not fa_profile:
+            ax.clear()
+            ax.text(0.5, 0.5, "FA profile no disponible", ha="center", va="center")
+            ax.set_axis_off()
+            return
+        phase = np.asarray(fa_profile.get("phase_bins_deg", []), dtype=float)
+        max_amp = np.asarray(fa_profile.get("max_amp_by_bin", []), dtype=float)
+        max_smooth = np.asarray(fa_profile.get("max_amp_smooth", []), dtype=float)
+        count = np.asarray(fa_profile.get("count_by_bin", []), dtype=float)
+        if phase.size == 0:
+            ax.clear()
+            ax.text(0.5, 0.5, "FA profile vacío", ha="center", va="center")
+            ax.set_axis_off()
+            return
+        max_amp_plot = np.copy(max_amp)
+        max_amp_plot[np.isnan(max_amp_plot)] = 0.0
+        if np.any(count > 0):
+            count_norm = count / np.max(count)
+        else:
+            count_norm = count
+
+        ax.clear()
+        ax.plot(phase, max_amp_plot, marker="o", linestyle="none", alpha=0.4, label="Max amp por bin")
+        if max_smooth.size:
+            ax.plot(phase, max_smooth, linestyle="-", linewidth=2.0, label="Envolvente suavizada")
+        ax.set_xlabel("Fase (°)")
+        ax.set_ylabel("Amplitud (sensor)")
+        ax.set_xlim(0, 360)
+        ax.grid(True, alpha=0.3)
+
+        ax2 = ax.twinx()
+        ax2.fill_between(phase, 0, count_norm, alpha=0.15, step="mid", label="Conteo (norm)")
+        ax2.set_ylabel("Conteo normalizado")
+
+        lines, labels = ax.get_legend_handles_labels()
+        lines2, labels2 = ax2.get_legend_handles_labels()
+        if lines or lines2:
+            ax.legend(lines + lines2, labels + labels2, loc="upper right", fontsize=8)
+        ax.set_title("Perfil fase–amplitud (FA profile)")
+
+    def _draw_fa_profile_right(self, ax, result: dict, ph_al: np.ndarray, amp_al: np.ndarray) -> None:
+        fa_profile = result.get("fa_profile") if isinstance(result, dict) else None
+        ax.clear()
+        ax.set_facecolor("#fffdf5")
+        if ph_al.size and amp_al.size:
+            self._draw_prpd_scatter_base(ax, result)
+        else:
+            ax.text(0.5, 0.5, "Sin PRPD alineado", ha="center", va="center")
+        if fa_profile:
+            phase = np.asarray(fa_profile.get("phase_bins_deg", []), dtype=float)
+            env = np.asarray(fa_profile.get("max_amp_smooth", []), dtype=float)
+            if phase.size and env.size:
+                ax.plot(phase, env, color="#ff7f0e", linewidth=2.4, label="Envolvente FA")
+                try:
+                    ax.legend(loc="upper right", fontsize=8)
+                except Exception:
+                    pass
+        ax.set_xlim(0, 360)
+        ax.set_xlabel("Fase (°)")
+        ax.set_ylabel("Amplitud")
+        self._apply_auto_ylim(ax, amp_al)
+        ax.set_title("PRPD alineado + envolvente FA")
+
+    def _draw_fa_profile_view(self, r: dict, ph_al: np.ndarray, amp_al: np.ndarray) -> None:
+        """Vista 'FA profile': perfil 1D y overlay sobre PRPD alineado."""
+        self._restore_standard_axes()
+        for ax in (self.ax_raw, self.ax_filtered):
+            ax.set_visible(True)
+            ax.set_axis_on()
+        for ax in (self.ax_probs, self.ax_text, self.ax_gap_wide):
+            ax.set_visible(False)
+            ax.clear()
+        self._draw_fa_profile_left(self.ax_raw, r)
+        self._draw_fa_profile_right(self.ax_filtered, r, ph_al, amp_al)
+
     def _ensure_conclusion_axis(self):
         """Devuelve el eje que ocupa todo el rectángulo inferior."""
         if self.ax_conclusion_box is None:
@@ -2298,6 +2390,10 @@ class PRPDWindow(QMainWindow):
         - ax_filtered: H_amp+ y H_amp- (N=16)
         - ax_text:     H_ph+ y H_ph-   (N=16)
         """
+        # Histogramas H_amp/H_ph:
+        # - Se calculan on-the-fly desde result["aligned"] (phase_deg, amplitude).
+        # - N=16 bins (log10(1+conteos)), no se guardan en result.
+        # - Semiciclo+: fase<180; Semiciclo-: fase>=180 (fase-180 para H_ph-).
         ax = self.ax_filtered
         ax.clear()
         try:
@@ -2904,6 +3000,7 @@ class PRPDWindow(QMainWindow):
         is_gap_ext = view_mode.startswith("gap-time extenso")
         is_gap_full = view_mode.startswith("gap-time") and not is_gap_ext
         is_kpi_adv = view_mode.startswith("kpi avanzados")
+        is_fa_profile = view_mode.startswith("fa profile")
 
         text, payload = self._get_conclusion_insight(r)
         payload = payload or {}
@@ -2941,6 +3038,18 @@ class PRPDWindow(QMainWindow):
             return
         if is_kpi_adv:
             self._render_kpi_avanzados(r, payload)
+            self.canvas.draw_idle()
+            return
+        if is_fa_profile:
+            ph_al = np.asarray(r.get("aligned", {}).get("phase_deg", []), dtype=float)
+            amp_al = np.asarray(r.get("aligned", {}).get("amplitude", []), dtype=float)
+            self._draw_fa_profile_view(r, ph_al, amp_al)
+            self.canvas.draw_idle()
+            return
+        if is_fa_profile:
+            ph_al = np.asarray(r.get("aligned", {}).get("phase_deg", []), dtype=float)
+            amp_al = np.asarray(r.get("aligned", {}).get("amplitude", []), dtype=float)
+            self._draw_fa_profile_view(r, ph_al, amp_al)
             self.canvas.draw_idle()
             return
 

@@ -2,6 +2,48 @@ import numpy as np
 from PRPDapp.logic_hist import compute_semicycle_histograms_from_aligned
 from PRPDapp.logic_kpi_hist import kpi_from_histograms
 
+# -----------------------------------------------------------------------------
+# Contrato de datos (referencia rápida)
+# -----------------------------------------------------------------------------
+# result actual (resumen):
+# - raw: phase_deg, amplitude, quantity (opc)
+# - aligned: phase_deg, amplitude, quantity/quintiles/deciles (opc), pixel (opc)
+# - angpd: phi_centers (0–360, bins=72), angpd (sum=1), n_angpd (max=1),
+#          angpd_qty, n_angpd_qty (si hay quantity)
+# - kpi: KPIs base; kpi["hist"] contiene KPIs derivados de H_amp/H_ph (N=16)
+# - metrics_advanced: métricas avanzadas (skew/kurt/medianas/correlación/peaks)
+#
+# H_amp / H_ph:
+# - Se calculan on-the-fly con compute_semicycle_histograms_from_aligned
+#   (N=16, log10(1+conteos)), no existe result["histograms"].
+#
+# ANGPD actual:
+# - _compute_angpd (bins=72, 0..360). n_angpd normaliza a max=1, angpd a sum=1.
+# - Variantes *_qty si hay quantity.
+#
+# Contrato propuesto (reserva de nombres, sin lógica aún):
+# - fa_profile (nuevo bloque en result):
+#     {
+#       "phi_deg": ndarray float (fase 0–360 de la discretización usada),
+#       "amp_curve": ndarray float (curva principal, normalización a definir),
+#       "amp_curve_norm": ndarray float (opcional, max=1),
+#       "qty_curve": ndarray float (opcional),
+#       "bins": int,
+#       "meta": dict (origen/pesos/nota de normalización)
+#     }
+# - fa_kpis (derivado de fa_profile):
+#     {
+#       "peak_bin_pos"/"peak_bin_neg": int,
+#       "active_bins_pos"/"active_bins_neg": int,
+#       "corr_pos_neg": float,
+#       "bandwidth_deg": float,
+#       "centroid_deg": float,
+#       "qty_ratio": float,
+#       "meta": dict (normalización usada, etc.)
+#     }
+# Estos nombres quedan reservados para el desarrollo futuro de la nueva vista.
+# -----------------------------------------------------------------------------
+
 
 def _circ_mean_deg_array(ph: np.ndarray) -> float | None:
     try:

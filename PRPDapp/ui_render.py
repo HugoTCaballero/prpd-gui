@@ -113,6 +113,8 @@ def render_conclusions(wnd, result: dict, payload: dict | None = None) -> None:
     metrics_adv = payload.get("metrics_advanced", {}) if isinstance(payload, dict) else {}
     if not metrics_adv:
         metrics_adv = result.get("metrics_advanced", {})
+    fa_kpis = result.get("fa_kpis", {}) if isinstance(result, dict) else {}
+    fa_kpis = result.get("fa_kpis", {}) if isinstance(result, dict) else {}
     manual = wnd.manual_override if getattr(wnd, "manual_override", {}).get("enabled") else None
     gap_stats = payload.get("gap") if isinstance(payload, dict) else None
 
@@ -368,6 +370,30 @@ def render_conclusions(wnd, result: dict, payload: dict | None = None) -> None:
                 badge_rel = ("Estable", "#1565c0")
     _draw_triplet_row(left_ax, y_left, "Relacion N-ANGPD/ANGPD", f"{metrics.get('n_ang_ratio', 'N/D')}", "-", "-", badge_rel if badge_rel else ("", "#ffffff"), badge_rel is not None, 0.58)
     y_left -= 0.075
+
+    # KPIs FA profile
+    def _fmt_fa(val, decimals=2):
+        try:
+            if val is None:
+                return "N/D"
+            if isinstance(val, (float, np.floating)) and np.isnan(val):
+                return "N/D"
+            if isinstance(val, (int, np.integer)):
+                return f"{int(val):,}"
+            return f"{float(val):.{decimals}f}"
+        except Exception:
+            return "N/D"
+
+    fa_rows = [
+        ("Simetrfa semicírculos", _fmt_fa(fa_kpis.get("symmetry_index"))),
+        ("Centro de fase (°)", _fmt_fa(fa_kpis.get("phase_center_deg"))),
+        ("Anchura fase (°)", _fmt_fa(fa_kpis.get("phase_width_deg"))),
+        ("Índice concentración FA", _fmt_fa(fa_kpis.get("ang_amp_concentration_index"))),
+        ("P95 amplitud (FA)", _fmt_fa(fa_kpis.get("p95_amplitude"))),
+    ]
+    for label, val in fa_rows:
+        y_left = _draw_triplet_row(left_ax, y_left, label, val, "-", "-", ("", "#ffffff"), spacing=0.20)
+    y_left -= 0.04
 
     def _wrap_action_text(text_value: str) -> list[str]:
         parts = []

@@ -1,6 +1,87 @@
-﻿# prpd_core.py
+# prpd_core.py
 # Núcleo de procesamiento: carga CSV, detección de ruido, auto-fase (0/120/240),
 # clustering DBSCAN + prune, features, heurística de clase y severidad.
+# Estructura actual de result (2025-03-12, claves realmente llenadas):
+#   - raw: phase_deg, amplitude, quantity (opc)
+#   - aligned: phase_deg, amplitude, quantity/quintiles/deciles (opc), pixel (opc)
+#   - labels: np.ndarray int (DBSCAN para todos los puntos, ruido incluido)
+#   - keep_mask: np.ndarray bool (puntos conservados tras prune)
+#   - labels_aligned: etiquetas para puntos alineados/filtrados (>=0)
+#   - phase_offset: float; phase_vector_R: float
+#   - has_noise: bool; noise_meta: dict
+#   - n_clusters: int
+#   - features: dict; predicted: clase heur?stica; probs: dict de probabilidades
+#   - severity_score, severity_breakdown: severidad y desglose
+#   - angpd: dict con phi_centers (0–360, bins=72), angpd (sum=1), n_angpd (max=1),
+#            angpd_qty, n_angpd_qty (si hay quantity)
+#   - s5_min_frac, s3_eps, s3_min_samples, s3_force_multi: metadatos clustering
+#   - run_id, source_path, phase_mask_ranges, pixel_deciles_meta, qty_deciles_meta,
+#     qty_quintiles_meta
+#   - Estado de “histograms” (2025-03-12): no existe result["histograms"] en el
+#     flujo real. H_amp/H_ph se calculan on-the-fly en main.py usando aligned.
+#   - Contrato propuesto (futuro) para nueva vista “FA profile”:
+#       result["fa_profile"] = {
+#           "phase_bins_deg":  np.ndarray  # centros de bins de fase (0–360°)
+#           "max_amp_by_bin":  np.ndarray  # amplitud máxima por bin
+#           "min_amp_by_bin":  np.ndarray  # amplitud mínima/percentil bajo por bin
+#           "count_by_bin":    np.ndarray  # número de pulsos por bin
+#           "max_amp_smooth":  np.ndarray  # envolvente suavizada de max_amp_by_bin
+#       }
+#       result["fa_kpis"] = {
+#           "total_pulses": int,
+#           "pulses_pos": int,
+#           "pulses_neg": int,
+#           "symmetry_index": float,   # 0–1, 1 = simetría perfecta entre semiondas
+#           "max_amplitude": float,
+#           "mean_amplitude": float,
+#           "p95_amplitude": float,
+#           "phase_center_deg": float, # centro de masa en fase
+#           "phase_width_deg": float,  # ancho efectivo (p.ej. 90% de pulsos)
+#       }
+#     Solo contrato; la lógica se implementará más adelante.
+
+# ----------------------------------------------------------------------
+# Vista "FA profile" (fase–amplitud)
+#
+# Esta vista proporciona un resumen 1D del patrón PRPD.
+#
+# Campos añadidos a `result`:
+# - result["fa_profile"]:
+#     - "phase_bins_deg": centros de bin de fase (0–360°)
+#     - "max_amp_by_bin": amplitud máxima en cada bin de fase
+#     - "min_amp_by_bin": percentil bajo de amplitud por bin
+#     - "count_by_bin":   número de pulsos en cada bin
+#     - "max_amp_smooth": envolvente suavizada para análisis visual/KPIs
+#     - "bin_width_deg":  ancho de bin usado
+# - result["fa_kpis"]:
+#     - "total_pulses", "pulses_pos", "pulses_neg"
+#     - "symmetry_index"
+#     - "max_amplitude", "mean_amplitude", "p95_amplitude"
+#     - "phase_center_deg", "phase_width_deg"
+#     - "ang_amp_concentration_index"
+#
+# Nota: ANGPD y los histogramas existentes no se modifican.
+# ----------------------------------------------------------------------
+
+# Resumen Paso 1 – Estado al 2025-03-12
+# 1) result actual:
+#    raw, aligned, labels, keep_mask, labels_aligned, phase_offset, phase_vector_R,
+#    has_noise/noise_meta, n_clusters, features, predicted/probs, severity_score/
+#    severity_breakdown, angpd, s5_min_frac, s3_eps, s3_min_samples, s3_force_multi,
+#    run_id, source_path, phase_mask_ranges, pixel_deciles_meta, qty_deciles_meta,
+#    qty_quintiles_meta. angpd → phi_centers, angpd, n_angpd, angpd_qty, n_angpd_qty.
+# 2) ANGPD:
+#    se calcula en _compute_angpd; usa aligned.phase_deg (y opcionalmente weights
+#    de amplitud o quantity). Es 1D vs fase (bins=72) y NO es histograma 2D.
+# 3) Histogramas H_amp/H_ph:
+#    se calculan on-the-fly en main.py (_draw_histograms_semiciclo / _save_histograms),
+#    N=16 bins, no existe result["histograms"].
+# 4) Legacy:
+#    result["histograms"] no existe; cualquier intento previo marcado como no usado.
+# 5) Nueva vista “FA profile”:
+#    claves reservadas result["fa_profile"] / result["fa_kpis"] con contrato de datos
+#    documentado; stubs añadidos (compute_fa_profile_stub / compute_fa_kpis_stub),
+#    aún no conectados al flujo.
 
 from __future__ import annotations
 from pathlib import Path
@@ -8,6 +89,21 @@ import numpy as np
 from sklearn.cluster import DBSCAN, KMeans
 import xml.etree.ElementTree as ET
 import math
+
+
+def debug_dump_result_keys(result):
+    """
+    Solo para depuración manual. Imprime claves principales de result y, si existe,
+    las claves de result["angpd"]. No se usa en la GUI.
+    """
+    try:
+        print("\n[DEBUG] result keys:", sorted(result.keys()))
+        ang = result.get("angpd")
+        if isinstance(ang, dict):
+            print("[DEBUG] angpd keys:", sorted(ang.keys()))
+    except Exception as exc:
+        print("[DEBUG] error al inspeccionar result:", exc)
+
 
 SN_FILTER_CONFIGS = {
     "sn1": {"eps": 0.045, "min_samples": 8, "min_share": 0.02, "fallback_eps": [0.035, 0.03], "force_multi": True, "keep_all": True, "s5_min_frac": 0.02, "s3_eps": 0.065, "s3_min_samples": 6, "s3_force_multi": True},
@@ -387,7 +483,12 @@ def severity_with_breakdown(features):
 
 # ---------- pipeline ----------
 def _compute_angpd(phase_deg: np.ndarray, bins: int = 72, weights: np.ndarray | None = None) -> dict:
-    """Calcula ANGPD y N-ANGPD en bins uniformes (0..360)."""
+    """Calcula ANGPD y N-ANGPD como curva 1D vs fase (0..360).
+
+    NOTA (2025-03-12): esto no es un histograma 2D. La discretización
+    en `bins` (por defecto 72) solo sirve para obtener phi_centers y
+    las curvas 1D angpd (sum=1) y n_angpd (max=1).
+    """
     try:
         phi = np.asarray(phase_deg, dtype=float) % 360.0
         w = None if weights is None else np.asarray(weights, dtype=float)
@@ -405,6 +506,171 @@ def _compute_angpd(phase_deg: np.ndarray, bins: int = 72, weights: np.ndarray | 
     except Exception:
         return {"phi_centers": np.zeros(0), "angpd": np.zeros(0), "n_angpd": np.zeros(0)}
 
+
+def compute_fa_profile(
+    aligned: dict,
+    bin_width_deg: float = 6.0,
+    smooth_window_bins: int = 5,
+) -> dict:
+    """
+    Perfil fase–amplitud (FA) proyectado a 1D por bins de fase + envolvente suavizada.
+    - phase_bins_deg: centros de bins de fase (0–360)
+    - max_amp_by_bin / min_amp_by_bin: amplitud máx / min por bin
+    - count_by_bin: número de pulsos por bin
+    - max_amp_smooth: media móvil circular de la envolvente máxima
+    """
+    phase = np.asarray(aligned.get("phase_deg", []), dtype=float)
+    amp = np.asarray(aligned.get("amplitude", []), dtype=float)
+    if phase.size == 0 or amp.size == 0:
+        return {
+            "phase_bins_deg": np.array([]),
+            "max_amp_by_bin": np.array([]),
+            "min_amp_by_bin": np.array([]),
+            "count_by_bin":   np.array([]),
+            "max_amp_smooth": np.array([]),
+        }
+
+    # bins de fase
+    n_bins = int(np.round(360.0 / max(bin_width_deg, 1e-3)))
+    if n_bins < 16:
+        n_bins = 16
+    bin_edges = np.linspace(0.0, 360.0, n_bins + 1)
+    phase_wrapped = np.mod(phase, 360.0)
+    bin_idx = np.digitize(phase_wrapped, bin_edges) - 1
+    bin_idx = np.clip(bin_idx, 0, n_bins - 1)
+    phase_centers = 0.5 * (bin_edges[:-1] + bin_edges[1:])
+
+    max_amp_by_bin = np.full(n_bins, np.nan, dtype=float)
+    min_amp_by_bin = np.full(n_bins, np.nan, dtype=float)
+    count_by_bin = np.zeros(n_bins, dtype=int)
+
+    for i in range(n_bins):
+        mask = (bin_idx == i)
+        if not np.any(mask):
+            continue
+        vals = amp[mask]
+        count_by_bin[i] = vals.size
+        max_amp_by_bin[i] = float(np.max(vals))
+        # percentil bajo para no quedarnos con outliers de ruido
+        min_amp_by_bin[i] = float(np.percentile(vals, 10.0))
+
+    # suavizado circular de la envolvente máxima
+    max_amp_clean = np.copy(max_amp_by_bin)
+    nan_mask = np.isnan(max_amp_clean)
+    if np.any(nan_mask):
+        max_amp_clean[nan_mask] = 0.0
+    w = int(smooth_window_bins)
+    if w < 1:
+        w = 1
+    kernel = np.ones(w, dtype=float) / float(w)
+    pad = w // 2
+    padded = np.pad(max_amp_clean, pad_width=pad, mode="wrap")
+    max_amp_smooth = np.convolve(padded, kernel, mode="valid")  # longitud = n_bins
+
+    return {
+        "phase_bins_deg": phase_centers,
+        "max_amp_by_bin": max_amp_by_bin,
+        "min_amp_by_bin": min_amp_by_bin,
+        "count_by_bin": count_by_bin,
+        "max_amp_smooth": max_amp_smooth,
+        "bin_width_deg": float(bin_width_deg),
+    }
+
+
+def _circ_mean_deg(ph: np.ndarray) -> float:
+    if ph.size == 0:
+        return np.nan
+    ph_rad = np.deg2rad(ph)
+    mean_angle = np.rad2deg(np.arctan2(np.sin(ph_rad).mean(), np.cos(ph_rad).mean())) % 360.0
+    return float(mean_angle)
+
+
+def _circ_width_deg(ph: np.ndarray) -> float:
+    if ph.size == 0:
+        return np.nan
+    ph_rad = np.deg2rad(ph)
+    R = np.sqrt(np.square(np.sin(ph_rad).mean()) + np.square(np.cos(ph_rad).mean()))
+    return float(np.rad2deg(np.sqrt(max(0.0, 2 * (1 - R)))))
+
+
+def compute_fa_kpis(aligned: dict, fa_profile: dict) -> dict:
+    """
+    KPIs globales a partir de pulsos alineados y del perfil FA.
+    """
+    phase = np.asarray(aligned.get("phase_deg", []), dtype=float)
+    amp = np.asarray(aligned.get("amplitude", []), dtype=float)
+    qty = aligned.get("quantity", None)
+    if qty is not None:
+        qty = np.asarray(qty, dtype=float)
+    else:
+        qty = np.ones_like(amp, dtype=float)
+
+    # Separación de semicírculos
+    sign = aligned.get("sign", None)
+    if sign is not None:
+        sign_arr = np.asarray(sign)
+        pos_mask = (sign_arr > 0)
+        neg_mask = (sign_arr < 0)
+    else:
+        phase_wrapped = np.mod(phase, 360.0)
+        pos_mask = (phase_wrapped >= 0.0) & (phase_wrapped < 180.0)
+        neg_mask = (phase_wrapped >= 180.0) & (phase_wrapped < 360.0)
+
+    # Conteos
+    total_pulses = int(phase.size)
+    pulses_pos = int(np.sum(pos_mask))
+    pulses_neg = int(np.sum(neg_mask))
+    symmetry_index = np.nan
+    if total_pulses > 0:
+        symmetry_index = 1.0 - abs(pulses_pos - pulses_neg) / float(total_pulses)
+
+    # Amplitud (con pesos qty para la media)
+    max_amplitude = float(np.max(amp)) if amp.size else np.nan
+    mean_amplitude = float(np.average(amp, weights=qty)) if amp.size else np.nan
+    p95_amplitude = float(np.percentile(amp, 95.0)) if amp.size else np.nan
+    amp_pos = amp[pos_mask]
+    amp_neg = amp[neg_mask]
+    p95_amp_pos = float(np.percentile(amp_pos, 95.0)) if amp_pos.size else np.nan
+    p95_amp_neg = float(np.percentile(amp_neg, 95.0)) if amp_neg.size else np.nan
+
+    # Fase (centro de masa y ancho efectivo usando pesos qty)
+    phase_center_deg = np.nan
+    phase_width_deg = np.nan
+    if phase.size:
+        phase_wrapped = np.mod(phase, 360.0)
+        ang_rad = np.deg2rad(phase_wrapped)
+        x = np.average(np.cos(ang_rad), weights=qty)
+        y = np.average(np.sin(ang_rad), weights=qty)
+        phase_center_deg = float((np.rad2deg(np.arctan2(y, x)) + 360.0) % 360.0)
+        phase_p5 = float(np.percentile(phase_wrapped, 5.0))
+        phase_p95 = float(np.percentile(phase_wrapped, 95.0))
+        phase_width_deg = phase_p95 - phase_p5
+
+    # KPIs desde fa_profile
+    count_by_bin = np.asarray(fa_profile.get("count_by_bin", []), dtype=float)
+    max_amp_smooth = np.asarray(fa_profile.get("max_amp_smooth", []), dtype=float)
+    ang_amp_concentration_index = np.nan
+    if max_amp_smooth.size and np.any(max_amp_smooth > 0):
+        ang_amp_concentration_index = float(
+            np.max(max_amp_smooth) / (np.mean(max_amp_smooth) + 1e-12)
+        )
+
+    return {
+        "total_pulses": total_pulses,
+        "pulses_pos": pulses_pos,
+        "pulses_neg": pulses_neg,
+        "symmetry_index": symmetry_index,
+        "max_amplitude": max_amplitude,
+        "mean_amplitude": mean_amplitude,
+        "p95_amplitude": p95_amplitude,
+        "phase_center_deg": phase_center_deg,
+        "phase_width_deg": phase_width_deg,
+        "phase_center_deg": phase_center_deg,
+        "phase_width_deg": phase_width_deg,
+        "ang_amp_concentration_index": ang_amp_concentration_index,
+        "p95_amp_pos": p95_amp_pos if 'p95_amp_pos' in locals() else None,
+        "p95_amp_neg": p95_amp_neg if 'p95_amp_neg' in locals() else None,
+    }
 
 def _quintile_index(v: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     """Igual que antes: quintiles por frecuencia (equal-frequency)."""
@@ -717,7 +983,12 @@ def process_prpd(path: Path, out_root: Path, force_phase_offsets=None, fast_mode
     if qty0 is not None:
         raw["quantity"] = np.asarray(qty0, dtype=float)
 
-    # ANGPD (|amplitud|) y N-ANGPD + variante por quantity si existe
+    # ANGPD (|amplitud|) y N-ANGPD + variante por quantity si existe.
+    # NOTA (2025-03-12): ANGPD aquí es una curva 1D vs fase (0–360). La
+    # discretización en 72 bins es solo para obtener phi_centers; NO es un
+    # histograma 2D. Las claves resultantes son:
+    #   phi_centers, angpd (sum=1), n_angpd (max=1),
+    #   angpd_qty, n_angpd_qty (si hay quantity).
     try:
         weights_amp = np.abs(aligned.get("amplitude", np.zeros(0)))
         weights_amp = weights_amp if weights_amp.size else None
@@ -735,6 +1006,15 @@ def process_prpd(path: Path, out_root: Path, force_phase_offsets=None, fast_mode
             angpd["n_angpd_qty"] = np.zeros_like(angpd.get("n_angpd", np.zeros(0)))
     except Exception:
         angpd = {"phi_centers": np.zeros(0), "angpd": np.zeros(0), "n_angpd": np.zeros(0), "angpd_qty": np.zeros(0), "n_angpd_qty": np.zeros(0)}
+
+    # Perfil FA y KPIs asociados (nueva vista)
+    try:
+        fa_profile = compute_fa_profile(aligned, bin_width_deg=6.0, smooth_window_bins=5)
+        fa_kpis = compute_fa_kpis(aligned, fa_profile)
+    except Exception as e:
+        print("[WARN] Error computing fa_profile/fa_kpis:", e)
+        fa_profile = None
+        fa_kpis = None
 
     # guardar auditoría mínima
     run_id = path.stem
@@ -769,6 +1049,8 @@ def process_prpd(path: Path, out_root: Path, force_phase_offsets=None, fast_mode
         "severity_score": sev,
         "severity_breakdown": sev_bd,
         "angpd": angpd,
+        "fa_profile": fa_profile,
+        "fa_kpis": fa_kpis,
         "s5_min_frac": s5_min_frac,
         "s3_eps": s3_eps,
         "s3_min_samples": s3_min_samples,
