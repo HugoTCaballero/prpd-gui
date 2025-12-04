@@ -21,3 +21,5 @@ def connect_events(wnd) -> None:
         pass
     wnd.cmb_plot.currentTextChanged.connect(wnd._on_view_changed)
     wnd.cmb_phase.currentIndexChanged.connect(wnd._on_phase_changed)
+    wnd.cmb_hist_bins.currentTextChanged.connect(wnd._on_hist_bins_changed)
+

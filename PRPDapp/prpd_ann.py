@@ -23,8 +23,12 @@ try:
 except Exception:
     joblib = None
 
-
-DEFAULT_CLASSES = ["cavidad", "superficial", "corona", "flotante", "ruido"]
+# Clases centralizadas
+try:
+    from PRPDapp.config_pd import CLASS_NAMES
+    DEFAULT_CLASSES = list(CLASS_NAMES)
+except Exception:
+    DEFAULT_CLASSES = ["cavidad", "superficial", "corona", "flotante", "suspendida", "ruido"]
 
 # Orden canónico de features (ajústalo a tu prpd_features.py si difiere)
 FEATURE_ORDER: List[str] = [
@@ -106,6 +110,7 @@ class PRPDANN:
             "corona": s_cor,
             "flotante": s_flo,
         }
+        scores["suspendida"] = 0.0
         # ruido = lo que no encaja
         noise = max(0.0, 0.8 - max(scores.values()))
         scores["ruido"] = noise

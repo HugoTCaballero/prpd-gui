@@ -1,4 +1,6 @@
 import numpy as np
+from PRPDapp.logic_hist import compute_semicycle_histograms_from_aligned
+from PRPDapp.logic_kpi_hist import kpi_from_histograms
 
 
 def _circ_mean_deg_array(ph: np.ndarray) -> float | None:
@@ -100,6 +102,11 @@ def compute_pd_metrics(result: dict, gap_stats: dict | None = None) -> dict:
     total_count = int(ph.size)
     count_pos = int(amp_pos.size)
     count_neg = int(amp_neg.size)
+    pulses_ratio = None
+    try:
+        pulses_ratio = round(count_pos / count_neg, 3) if count_neg > 0 else None
+    except Exception:
+        pulses_ratio = None
     balance = None
     if total_count > 0:
         balance = (count_pos - count_neg) / float(total_count)
@@ -108,6 +115,19 @@ def compute_pd_metrics(result: dict, gap_stats: dict | None = None) -> dict:
     gap_p5 = gap_stats.get("p5_ms") if isinstance(gap_stats, dict) else None
     gap_class_p50 = gap_stats.get("classification") if isinstance(gap_stats, dict) else {}
     gap_class_p5 = gap_stats.get("classification_p5") if isinstance(gap_stats, dict) else {}
+    # KPIs de histogramas (H_amp/H_ph) usando helper centralizado
+    hist_kpi = {}
+    try:
+        hist = compute_semicycle_histograms_from_aligned({"phase_deg": ph, "amplitude": amp}, N=16)
+        hist_kpi = kpi_from_histograms(hist)
+        if isinstance(result, dict):
+            kpi_dict = result.setdefault("kpi", {})
+            # Guardar KPIs planos y, adicionalmente, el bloque hist
+            kpi_dict.update(hist_kpi)
+            kpi_dict["hist"] = hist_kpi
+    except Exception:
+        hist_kpi = {}
+
     return {
         "amp_p95_pos": round(p95_pos, 2),
         "amp_p95_neg": round(p95_neg, 2),
@@ -126,12 +146,14 @@ def compute_pd_metrics(result: dict, gap_stats: dict | None = None) -> dict:
         "total_count": total_count,
         "count_pos": count_pos,
         "count_neg": count_neg,
+        "pulses_ratio": pulses_ratio,
         "pulse_balance": None if balance is None else round(balance, 3),
         "snr": round(snr, 3),
         "gap_p50": gap_p50,
         "gap_p5": gap_p5,
         "gap_class_p50": gap_class_p50,
         "gap_class_p5": gap_class_p5,
+        "hist_kpi": hist_kpi,
     }
 
 

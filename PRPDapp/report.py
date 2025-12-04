@@ -7,6 +7,7 @@ import json
 import numpy as np
 from matplotlib.backends.backend_pdf import PdfPages
 from matplotlib.figure import Figure
+from PRPDapp.config_pd import CLASS_NAMES, CLASS_INFO
 
 def _page_title(fig: Figure, title: str, subtitle: str = ""):
     ax = fig.add_subplot(111)
@@ -70,9 +71,11 @@ def export_pdf_report(result: dict, out_root: Path) -> Path:
                  f"Alineado/filtrado (offset={result['phase_offset']}°)")
 
         ax3 = fig.add_subplot(gs[1,0])
-        classes = ["cavidad","superficial","corona","flotante"]
+        classes = list(CLASS_NAMES)
         probs = [result["probs"].get(k,0.0) for k in classes]
-        ax3.bar(classes, probs)
+        colors = [CLASS_INFO.get(k,{}).get("color", "#888888") for k in classes]
+        labels = [CLASS_INFO.get(k,{}).get("name", k) for k in classes]
+        ax3.bar(labels, probs, color=colors)
         ax3.set_ylim(0,1); ax3.set_title("Probabilidades por clase")
         ax3.set_ylabel("Probabilidad")
 

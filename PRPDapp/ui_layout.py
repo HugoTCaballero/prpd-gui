@@ -144,6 +144,7 @@ def build_bottom_area(wnd):
         "Gap-time",
         "Gap-time extenso",
         "Histogramas",
+        "KPI avanzados",
         "Combinada",
         "Nubes",
         "Manual",
@@ -153,6 +154,11 @@ def build_bottom_area(wnd):
     sub = QHBoxLayout()
     sub.addWidget(QLabel("Vista:"))
     sub.addWidget(wnd.cmb_plot)
+    wnd.cmb_hist_bins = QComboBox()
+    wnd.cmb_hist_bins.addItems(["32 bins", "64 bins"])
+    wnd.cmb_hist_bins.setCurrentIndex(0)
+    sub.addWidget(QLabel("Bins:"))
+    sub.addWidget(wnd.cmb_hist_bins)
     wnd.chk_banner_dark = QCheckBox("Modo nocturno")
     wnd.chk_banner_dark.setToolTip("Alterna el banner inferior a la versión oscura (phaseflux_dark_mode.png).")
     sub.addWidget(wnd.chk_banner_dark)

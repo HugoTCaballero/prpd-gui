@@ -33,9 +33,12 @@ from report import export_pdf_report
 from datetime import datetime
 from utils_io import ensure_out_dirs, time_tag
 from prpd_ann import PRPDANN
+from PRPDapp.metrics.advanced_kpi import compute_advanced_metrics
+from PRPDapp.config_pd import CLASS_NAMES, CLASS_INFO
 from PRPDapp.clouds import pixel_cluster_clouds, combine_clouds, select_dominant_clouds
 from PRPDapp.logic import compute_pd_metrics as logic_compute_pd_metrics, classify_pd as logic_classify_pd
 from PRPDapp import ui_dialogs, ui_draw, ui_render, ui_layout, ui_events
+from PRPDapp.logic_hist import compute_semicycle_histograms_from_aligned
 
 
 
@@ -50,8 +53,7 @@ except Exception:
     _ann_predict_proba = None
 
 
-APP_TITLE = "PRPD GUI — Unificada (exports v2)"
-
+APP_TITLE = "PRPD GUI - Unificada (exports v2)"
 
 class PRPDWindow(QMainWindow):
     def __init__(self) -> None:
@@ -80,9 +82,47 @@ class PRPDWindow(QMainWindow):
         self.manual_override: dict = {"enabled": False}
         self.gap_ext_files: list[Path] = []
         self.banner_dark_mode: bool = False
+        self._hist_bins_phase = 32
+        self._hist_bins_amp = 32
+        self._dark_stylesheet = """
+        QMainWindow, QWidget {
+            background-color: #05070d;
+            color: #e5e7eb;
+        }
+        QLabel, QCheckBox, QRadioButton, QGroupBox {
+            color: #e5e7eb;
+        }
+        QPushButton {
+            background-color: #0f172a;
+            color: #e5e7eb;
+            border: 1px solid #233044;
+            border-radius: 4px;
+            padding: 4px 8px;
+        }
+        QPushButton:hover {
+            background-color: #1d4ed8;
+        }
+        QComboBox, QLineEdit, QPlainTextEdit, QTextEdit {
+            background-color: #0b1020;
+            color: #e5e7eb;
+            border: 1px solid #233044;
+            selection-background-color: #1d4ed8;
+        }
+        QMenu {
+            background-color: #0b1020;
+            color: #e5e7eb;
+            border: 1px solid #233044;
+        }
+        QToolTip {
+            background-color: #0f172a;
+            color: #e5e7eb;
+            border: 1px solid #1d4ed8;
+        }
+        """
 
         # ANN (fallback PRPDANN si no hay loader)
-        self.ann = PRPDANN(class_names=["cavidad","superficial","corona","flotante","ruido"])
+        self.pd_classes = CLASS_NAMES[:]  # referencia centralizada
+        self.ann = PRPDANN(class_names=self.pd_classes)
         self.ann_model = None
         self.ann_classes: list[str] = []
         # Auto-cargar models/ann.pkl si existe
@@ -112,10 +152,12 @@ class PRPDWindow(QMainWindow):
         # Eventos
         ui_events.connect_events(self)
         self._refresh_gap_ext_buttons()
+        # Tema inicial (claro)
+        self._apply_theme_stylesheet(self.banner_dark_mode)
 
 
     def _apply_default_size(self) -> None:
-        """Ajusta la ventana al 90% del área disponible, con mínimos seguros."""
+        """Ajusta la ventana al 90% del area disponible, con minimos seguros."""
         try:
             screen = self.screen() or QGuiApplication.primaryScreen()
             if screen is None:
@@ -131,6 +173,59 @@ class PRPDWindow(QMainWindow):
             )
         except Exception:
             self.resize(1200, 740)
+
+    def _precompute_qty_buckets(self, result: dict) -> None:
+        """Calcula cortes globales sobre quantity, etiqueta Q/Qt y alinea arrays completos."""
+        aligned = result.get("aligned", {}) or {}
+        qty_vals = np.asarray(aligned.get("quantity", []), dtype=float)
+        phase = np.asarray(aligned.get("phase_deg", []), dtype=float)
+        amp = np.asarray(aligned.get("amplitude", []), dtype=float)
+        if qty_vals.size == 0 or phase.size == 0 or amp.size == 0:
+            return
+
+        edges_q = np.percentile(qty_vals, [20, 40, 60, 80])
+        edges_d = np.percentile(qty_vals, [10, 20, 30, 40, 50, 60, 70, 80, 90])
+        quint_idx = np.digitize(qty_vals, edges_q, right=True) + 1
+        quint_idx = np.clip(quint_idx, 1, 5)
+        dec_idx = np.digitize(qty_vals, edges_d, right=True) + 1
+        dec_idx = np.clip(dec_idx, 1, 10)
+
+        aligned["qty_quintiles"] = quint_idx
+        aligned["qty_deciles"] = dec_idx
+        result["qty_quintiles_meta"] = {"edges": edges_q.tolist()}
+        result["qty_deciles_meta"] = {"edges": edges_d.tolist()}
+        self._align_full_arrays(aligned)
+
+    def _align_full_arrays(self, aligned: dict) -> None:
+        """Alinea phase/amp/qty y etiquetas Q/Qt al mismo largo y guarda _full_* coherentes."""
+        phase = np.asarray(aligned.get("phase_deg", []), dtype=float)
+        amp = np.asarray(aligned.get("amplitude", []), dtype=float)
+        qty = np.asarray(aligned.get("quantity", []), dtype=float)
+        quint = np.asarray(aligned.get("qty_quintiles", []), dtype=int)
+        dec = np.asarray(aligned.get("qty_deciles", []), dtype=int)
+        pixel = np.asarray(aligned.get("pixel", []), dtype=float)
+        labels = np.asarray(aligned.get("labels_aligned", []))
+
+        lengths = [arr.size for arr in (phase, amp, qty, quint, dec) if arr.size]
+        n = min(lengths) if lengths else 0
+        if n <= 0:
+            return
+
+        aligned["phase_deg"] = phase[:n]
+        aligned["amplitude"] = amp[:n]
+        aligned["quantity"] = qty[:n]
+        aligned["qty_quintiles"] = quint[:n]
+        aligned["qty_deciles"] = dec[:n]
+
+        aligned["_full_phase_deg"] = aligned["phase_deg"]
+        aligned["_full_amplitude"] = aligned["amplitude"]
+        aligned["_full_quantity"] = aligned["quantity"]
+        aligned["_full_qty_quintiles"] = aligned["qty_quintiles"]
+        aligned["_full_qty_deciles"] = aligned["qty_deciles"]
+        if pixel.size:
+            aligned["_full_pixel"] = pixel[:n]
+        if labels.size:
+            aligned["_full_labels_aligned"] = labels[:n]
 
     def _on_resolution_action(self, action) -> None:
         """Ajusta el tamano de la ventana/canvas segun el preset del boton Resolucion."""
@@ -218,36 +313,48 @@ class PRPDWindow(QMainWindow):
         return True
 
     def _on_view_changed(self, text: str) -> None:
-        """Abrir diálogo manual si se selecciona la vista Manual."""
+        """Abrir dialogo manual si se selecciona la vista Manual."""
         try:
             if text.strip().lower().startswith("manual"):
                 if self._open_manual_override_dialog():
                     self.manual_override["enabled"] = True
-                    # Mostrar conclusiones con override
                     self.cmb_plot.blockSignals(True)
                     self.cmb_plot.setCurrentText("Conclusiones")
                     self.cmb_plot.blockSignals(False)
                     if self.last_result:
                         self.render_result(self.last_result)
                 else:
-                    # Si cancela, volver a conclusiones
                     self.cmb_plot.blockSignals(True)
                     self.cmb_plot.setCurrentText("Conclusiones")
                     self.cmb_plot.blockSignals(False)
             else:
-                # Si se cambia a cualquier otra vista, sólo refrescar si hay resultado
+                if text.strip().lower().startswith("histogramas"):
+                    self._hist_bins_phase = 32
+                    self._hist_bins_amp = 32
                 if self.last_result:
                     self.render_result(self.last_result)
         except Exception:
             pass
 
-    # -------------------------------------------------------------------------
-    # Helper methods for phase offsets and filter labels
-    #
-    # Para garantizar coherencia en el uso de filtros y fases a lo largo de la
-    # aplicación, estas funciones devuelven los valores correspondientes a
-    # partir de los widgets de la interfaz. Usar estas funciones en lugar de
-    # acceder directamente a cmb_phase/cmb_filter en otras partes del código.
+    def _on_hist_bins_changed(self, text: str) -> None:
+        """Cambia bins de histograma (32/64) y recalcula metricas avanzadas si hay resultado."""
+        t = (text or "").lower()
+        bins = 32
+        if "64" in t:
+            bins = 64
+        self._hist_bins_phase = bins
+        self._hist_bins_amp = bins
+        try:
+            if self.last_result:
+                self.last_result["metrics_advanced"] = compute_advanced_metrics(
+                    {"aligned": self.last_result.get("aligned", {}), "angpd": self.last_result.get("angpd", {})},
+                    bins_amp=bins,
+                    bins_phase=bins,
+                )
+                self.render_result(self.last_result)
+        except Exception:
+            pass
+
     def _get_force_offsets(self) -> list[int] | None:
         """Devuelve la lista de offsets de fase seleccionados, o None si es modo auto.
 
@@ -791,39 +898,19 @@ class PRPDWindow(QMainWindow):
             pass
 
     def _apply_qty_filters(self, result: dict, keep_quints: list[int], keep_deciles: list[int]) -> None:
-        """Aplica filtros Q1-Q5 y Qt1-Qt10 sin recalcular percentiles (p20/p40/p60/p80)."""
-        aligned = result.get("aligned", {})
-        phase = np.asarray(aligned.get("phase_deg", []), dtype=float)
-        qty_vals = np.asarray(aligned.get("quantity", []), dtype=float)
+        """Aplica Q/Qt como m?scara booleana sobre arrays ya alineados y recorta la vista/export."""
+        aligned = result.get("aligned", {}) or {}
+        phase_full = np.asarray(aligned.get("_full_phase_deg", aligned.get("phase_deg", [])), dtype=float)
+        amp_full = np.asarray(aligned.get("_full_amplitude", aligned.get("amplitude", [])), dtype=float)
+        qty_full = np.asarray(aligned.get("_full_quantity", aligned.get("quantity", [])), dtype=float)
+        dec_full = np.asarray(aligned.get("_full_qty_deciles", aligned.get("qty_deciles", [])), dtype=int)
+        quint_full = np.asarray(aligned.get("_full_qty_quintiles", aligned.get("qty_quintiles", [])), dtype=int)
+        pixel_full = np.asarray(aligned.get("_full_pixel", aligned.get("pixel", [])), dtype=float)
+        labels_full = np.asarray(aligned.get("_full_labels_aligned", aligned.get("labels_aligned", [])))
 
-        # Obtener deciles ya calculados o reconstruir con edges globales
-        qty_dec = np.asarray(aligned.get("qty_deciles", []), dtype=int)
-        if qty_dec.size != phase.size:
-            edges = (result.get("qty_deciles_meta") or {}).get("edges", [])
-            if qty_vals.size == phase.size and len(edges) == 9:
-                qty_dec = self._deciles_from_edges(qty_vals, np.asarray(edges, dtype=float))
-                aligned["qty_deciles"] = qty_dec
-            else:
-                if qty_vals.size == phase.size:
-                    qty_dec = self._compute_deciles(qty_vals)
-                    aligned["qty_deciles"] = qty_dec
-                else:
-                    qty_dec = np.zeros_like(phase, dtype=int)
-
-        # Quintiles: usar los existentes, o mapear deciles, o recalcular desde valores
-        quint_idx = np.asarray(aligned.get("qty_quintiles", []), dtype=int)
-        if quint_idx.size != phase.size:
-            if qty_dec.size == phase.size and qty_dec.any():
-                quint_idx = self._quintiles_from_deciles(qty_dec)
-            else:
-                edges_q = (result.get("qty_quintiles_meta") or {}).get("edges", [])
-                if qty_vals.size == phase.size and len(edges_q) == 4:
-                    quint_idx = np.digitize(qty_vals, np.asarray(edges_q, dtype=float), right=True) + 1
-                elif qty_vals.size == phase.size:
-                    quint_idx = self._equal_frequency_bucket(qty_vals, groups=5)
-                else:
-                    quint_idx = np.zeros_like(phase, dtype=int)
-            aligned["qty_quintiles"] = quint_idx
+        n = phase_full.size
+        if n == 0:
+            return
 
         keep_q_set = {int(q) for q in keep_quints if 1 <= int(q) <= 5}
         keep_sub_set = {int(k) for k in keep_deciles if 1 <= int(k) <= 10}
@@ -833,30 +920,37 @@ class PRPDWindow(QMainWindow):
         all_deciles = (not keep_sub_set) or keep_sub_set == set(range(1, 11))
 
         if all_quints and all_deciles:
-            mask_keep = np.ones_like(phase, dtype=bool)
+            mask_keep = np.ones(n, dtype=bool)
         elif not keep_q_set:
-            mask_keep = np.zeros_like(phase, dtype=bool)
+            mask_keep = np.zeros(n, dtype=bool)
         else:
-            if qty_dec.size == phase.size and qty_dec.any():
-                mask_keep = np.zeros_like(phase, dtype=bool)
-                for q in range(1, 6):
-                    if q not in keep_q_set:
-                        continue
-                    subs = pairs[q]
-                    subs_on = {s for s in subs if s in keep_sub_set} if keep_sub_set else subs
+            mask_keep = np.zeros(n, dtype=bool)
+            for q in range(1, 6):
+                if q not in keep_q_set:
+                    continue
+                subs = pairs[q]
+                subs_on = {s for s in subs if s in keep_sub_set} if keep_sub_set else subs
+                if dec_full.size == 0:
+                    mask_keep |= (quint_full == q)
+                else:
                     if not subs_on:
                         continue
-                    mask_keep |= (quint_idx == q) & np.isin(qty_dec, list(subs_on))
-            else:
-                mask_keep = np.isin(quint_idx, list(keep_q_set))
+                    mask_keep |= (quint_full == q) & np.isin(dec_full, list(subs_on))
 
-        for key in ("phase_deg", "amplitude", "quantity", "qty_quintiles", "pixel", "labels_aligned"):
-            arr = aligned.get(key, None)
-            if arr is None:
-                continue
-            aligned[key] = np.asarray(arr)[mask_keep]
-        aligned["qty_deciles"] = qty_dec[mask_keep] if qty_dec.size else qty_dec
-        aligned["qty_quintiles"] = quint_idx[mask_keep] if quint_idx.size else quint_idx
+        aligned["phase_deg"] = phase_full[mask_keep]
+        aligned["amplitude"] = amp_full[mask_keep]
+        aligned["quantity"] = qty_full[mask_keep]
+        aligned["qty_quintiles"] = quint_full[mask_keep]
+        aligned["qty_deciles"] = dec_full[mask_keep]
+        if pixel_full.size:
+            aligned["pixel"] = pixel_full[mask_keep]
+        if labels_full.size:
+            aligned["labels_aligned"] = labels_full[mask_keep]
+
+        if pixel_full.size:
+            aligned["pixel"] = pixel_full[mask_keep]
+        if labels_full.size:
+            aligned["labels_aligned"] = labels_full[mask_keep]
 
     @staticmethod
     def _equal_frequency_bucket(values: np.ndarray, groups: int = 5) -> np.ndarray:
@@ -1138,10 +1232,11 @@ class PRPDWindow(QMainWindow):
             pass
 
     def on_toggle_banner_mode(self, checked: bool) -> None:
-        """Alterna el banner claro/oscuro."""
+        """Alterna el banner claro/oscuro y aplica tema."""
         try:
             self.banner_dark_mode = bool(checked)
             self._refresh_signature_banner()
+            self._apply_theme_stylesheet(self.banner_dark_mode)
         except Exception:
             pass
 
@@ -1165,6 +1260,40 @@ class PRPDWindow(QMainWindow):
             self._signature_pixmap = None
             self.signature_label.setText("\nFirma/Autoría no encontrada.\nColoque 'firma_banner.png' o 'phaseflux_dark_mode.png' en la carpeta del programa.")
         self.signature_label.setAlignment(Qt.AlignCenter)
+
+    def _apply_theme_stylesheet(self, dark: bool) -> None:
+        """Aplica un tema oscuro/claro a la GUI principal."""
+        try:
+            if dark:
+                self.setStyleSheet(self._dark_stylesheet)
+            else:
+                self.setStyleSheet("")
+            self._apply_axes_theme(dark)
+        except Exception:
+            pass
+
+    def _apply_axes_theme(self, dark: bool) -> None:
+        """Ajusta el fondo de los ejes para que coincidan con el modo (claro/oscuro)."""
+        face = "#0b1020" if dark else "#ffffff"
+        axes = [
+            getattr(self, "ax_raw", None),
+            getattr(self, "ax_filtered", None),
+            getattr(self, "ax_probs", None),
+            getattr(self, "ax_text", None),
+            getattr(self, "ax_gap_wide", None),
+        ]
+        for ax in axes:
+            try:
+                if ax:
+                    ax.set_facecolor(face)
+                    if hasattr(ax, "fig"):
+                        ax.figure.patch.set_facecolor(face)
+            except Exception:
+                pass
+        try:
+            self.canvas.draw_idle()
+        except Exception:
+            pass
 
     def _update_signature_pixmap(self) -> None:
         """Escala el banner sin exceder la altura máxima manteniento relación de aspecto."""
@@ -1217,12 +1346,32 @@ class PRPDWindow(QMainWindow):
                 filter_level=filt_label,
                 phase_mask=mask_ranges,
                 pixel_deciles_keep=pixel_deciles,
-                qty_deciles_keep=qty_deciles,
             )
             if self.chk_gap.isChecked():
                 gx = getattr(self, "_gap_xml_path", None)
                 if gx:
                     result["gap_stats"] = self._compute_gap(gx) or {}
+            # KPIs básicos (métricas clásicas)
+            try:
+                result["metrics"] = logic_compute_pd_metrics(result, gap_stats=result.get("gap_stats"))
+            except Exception:
+                result["metrics"] = {}
+            # Calcular cortes globales de quantity (Q/Qt) una sola vez
+            try:
+                self._precompute_qty_buckets(result)
+            except Exception:
+                pass
+            # KPIs avanzados y clasificador heurístico
+            try:
+                bins_phase = getattr(self, "_hist_bins_phase", 32)
+                bins_amp = getattr(self, "_hist_bins_amp", 32)
+                result["metrics_advanced"] = compute_advanced_metrics(
+                    {"aligned": result.get("aligned", {}), "angpd": result.get("angpd", {})},
+                    bins_amp=bins_amp,
+                    bins_phase=bins_phase,
+                )
+            except Exception:
+                result["metrics_advanced"] = {}
             self.last_result = result
             self.last_run_profile = self._collect_current_profile()
             self._apply_qty_filters(result, qty_quints, qty_deciles)
@@ -1472,8 +1621,9 @@ class PRPDWindow(QMainWindow):
             if amp.size < 5:
                 return {}
             base = float(np.median(amp))
-            threshold = base + 5.0  # descarga si supera base+5 (no simétrico)
-            mask = amp > threshold
+            threshold_high = base + 5.0
+            threshold_low = base - 5.0
+            mask = (amp > threshold_high) | (amp < threshold_low)
 
             def _safe_float(text: str | None) -> float | None:
                 try:
@@ -1519,7 +1669,8 @@ class PRPDWindow(QMainWindow):
                 "p5_ms": p5,
                 "gaps_ms": gaps_arr.tolist(),
                 "base": base,
-                "threshold": threshold,
+                "threshold_high": threshold_high,
+                "threshold_low": threshold_low,
                 "dt_ms": dt_ms,
                 "time_s": (time_ms / 1000.0).tolist(),
                 "series": amp.tolist(),
@@ -1707,7 +1858,8 @@ class PRPDWindow(QMainWindow):
         rows = []
         offset_ms = 0.0
         base_line = None
-        threshold_line = None
+        threshold_line_high = None
+        threshold_line_low = None
 
         for idx, path in enumerate(self.gap_ext_files, 1):
             stats: dict = {}
@@ -1727,7 +1879,9 @@ class PRPDWindow(QMainWindow):
             mask = np.asarray(stats.get("mask", []), dtype=bool)
             if mask.size != amp.size:
                 base_tmp = float(stats.get("base") or (np.median(amp) if amp.size else 0.0))
-                mask = amp > (float(stats.get("threshold") or (base_tmp + 5.0)))
+                th_hi = float(stats.get("threshold_high") or (base_tmp + 5.0))
+                th_lo = float(stats.get("threshold_low") or (base_tmp - 5.0))
+                mask = (amp > th_hi) | (amp < th_lo)
 
             if amp.size:
                 t_local = np.arange(amp.size, dtype=float) * dt_ms + offset_ms
@@ -1747,8 +1901,12 @@ class PRPDWindow(QMainWindow):
 
             if base_line is None and stats.get("base") is not None:
                 base_line = float(stats["base"])
-            if threshold_line is None and stats.get("threshold") is not None:
-                threshold_line = float(stats["threshold"])
+            th_hi = stats.get("threshold_high")
+            th_lo = stats.get("threshold_low")
+            if threshold_line_high is None and th_hi is not None:
+                threshold_line_high = float(th_hi)
+            if threshold_line_low is None and th_lo is not None:
+                threshold_line_low = float(th_lo)
 
             rows.append((idx, path.name, p50, p5, label))
 
@@ -1769,10 +1927,12 @@ class PRPDWindow(QMainWindow):
             ax_series.scatter(spikes_t, spikes_y, color="#e65100", s=14, zorder=5, label="Descarga detectada")
         if base_line is not None:
             ax_series.axhline(base_line, color="#1b5e20", linestyle="--", linewidth=1.0, alpha=0.7, label="Mediana")
-        if threshold_line is not None:
-            ax_series.axhline(threshold_line, color="#2e7d32", linestyle=":", linewidth=1.2, alpha=0.9, label="Umbral base+5")
-            if base_line is not None:
-                ax_series.axhspan(base_line, threshold_line, color="#d0e8d0", alpha=0.2, zorder=0)
+        if threshold_line_high is not None:
+            ax_series.axhline(threshold_line_high, color="#2e7d32", linestyle=":", linewidth=1.2, alpha=0.9, label="Umbral base+5")
+        if threshold_line_low is not None:
+            ax_series.axhline(threshold_line_low, color="#2e7d32", linestyle=":", linewidth=1.2, alpha=0.9)
+        if base_line is not None and threshold_line_high is not None and threshold_line_low is not None:
+            ax_series.axhspan(threshold_line_low, threshold_line_high, color="#d0e8d0", alpha=0.2, zorder=0)
 
         ax_series.grid(True, alpha=0.25, linestyle="--", color="#778")
         ax_series.set_xlabel("Tiempo combinado (ms)")
@@ -1797,6 +1957,35 @@ class PRPDWindow(QMainWindow):
                            bbox=dict(boxstyle="round,pad=0.35", fc="#ffcdd2", ec="#c62828", alpha=0.9))
 
         ax_series.legend(loc="upper right", fontsize=8, frameon=True)
+        # Badge de severidad siempre visible
+        label_txt = ""
+        color_txt = "#1f2937"
+        if cls_all:
+            label_txt = cls_all.get("level_name") or cls_all.get("label") or ""
+            color_txt = cls_all.get("color", color_txt)
+        else:
+            label_txt = "Severidad N/D"
+
+        # Texto en caja coloreada para que resalte
+        try:
+            # Pequeño contraste: blanco si el color es oscuro
+            import matplotlib.colors as mcolors
+            r, g, b = mcolors.to_rgb(color_txt)
+            luminance = 0.299 * r + 0.587 * g + 0.114 * b
+            txt_color = "#ffffff" if luminance < 0.5 else "#0f172a"
+        except Exception:
+            txt_color = "#0f172a"
+        ax_series.text(
+            0.82, 0.08,
+            f"Severidad: {label_txt}",
+            transform=ax_series.transAxes,
+            ha="left",
+            va="center",
+            fontsize=10,
+            fontweight="bold",
+            bbox=dict(boxstyle="round,pad=0.35", fc=color_txt, ec=color_txt, alpha=0.85),
+            color=txt_color,
+        )
 
         table_ax.text(0.02, 0.95, header_txt, fontsize=11, fontweight="bold", ha="left", va="top")
         headers = ["#", "Archivo", "P50 (ms)", "P5 (ms)", "Severidad"]
@@ -1819,6 +2008,55 @@ class PRPDWindow(QMainWindow):
         table_ax.text(xcols[3], y_txt - 0.02, f"{p5_all:.3f}" if p5_all is not None else "N/D", fontsize=9, fontweight="bold", ha="left", va="top")
         table_ax.text(xcols[4], y_txt - 0.02, cls_all.get("level_name", "N/D") if cls_all else "N/D", fontsize=9, fontweight="bold", ha="left", va="top")
         table_ax.text(0.02, 0.10, "Etiqueta basada en p50 (tabla _gap_condition).", fontsize=9, style="italic", ha="left", va="top")
+
+    def _render_kpi_avanzados(self, r: dict, payload: dict | None = None) -> None:
+        """Vista sencilla para KPIs avanzados / histogramas."""
+        self._set_conclusion_mode(False)
+        self._restore_standard_axes()
+        for ax in (self.ax_raw, self.ax_filtered, self.ax_probs, self.ax_text):
+            ax.clear()
+            ax.set_facecolor("#fafafa")
+            try:
+                ax.set_xticks([]); ax.set_yticks([])
+            except Exception:
+                pass
+
+        metrics = (payload or {}).get("metrics") if isinstance(payload, dict) else None
+        if metrics is None:
+            metrics = r.get("kpi", {}) if isinstance(r, dict) else {}
+        hist_kpi = {}
+        try:
+            hist_kpi = r.get("kpi", {}).get("hist", {}) if isinstance(r, dict) else {}
+        except Exception:
+            hist_kpi = {}
+        adv = r.get("metrics_advanced", {}) if isinstance(r, dict) else {}
+
+        ax_top = self.ax_raw
+        ax_top.set_visible(True)
+        txt_lines = ["KPI avanzados", ""]
+        if hist_kpi:
+            txt_lines.append("Histogramas (N=16):")
+            for k, v in hist_kpi.items():
+                txt_lines.append(f" - {k}: {v}")
+        else:
+            txt_lines.append("Sin KPIs de histogramas disponibles.")
+        ax_top.text(0.02, 0.98, "\n".join(txt_lines), va="top", ha="left", fontsize=10)
+
+        ax_bottom = self.ax_filtered
+        ax_bottom.set_visible(True)
+        lines2 = ["Metrics advanced (resumen)", ""]
+        if isinstance(adv, dict) and adv:
+            for k, v in adv.items():
+                if isinstance(v, dict):
+                    lines2.append(f"{k}: { {kk: vv for kk,vv in list(v.items())[:5]} }")
+                else:
+                    lines2.append(f"{k}: {v}")
+                if len(lines2) > 18:
+                    break
+        else:
+            lines2.append("Sin metrics_advanced.")
+        ax_bottom.text(0.02, 0.98, "\n".join(lines2), va="top", ha="left", fontsize=10)
+        self.canvas.draw_idle()
 
     @staticmethod
     def _safe_append_summary(path: Path, kv: dict) -> Path | None:
@@ -2063,41 +2301,81 @@ class PRPDWindow(QMainWindow):
         ax = self.ax_filtered
         ax.clear()
         try:
-            ph = np.asarray(r.get("aligned", {}).get("phase_deg", []), dtype=float)
-            amp = np.asarray(r.get("aligned", {}).get("amplitude", []), dtype=float)
-            if not (ph.size and amp.size):
+            aligned = r.get("aligned", {}) or {}
+            ph_arr = np.asarray(aligned.get("phase_deg", []), dtype=float)
+            amp_arr = np.asarray(aligned.get("amplitude", []), dtype=float)
+            if ph_arr.size == 0 or amp_arr.size == 0:
                 ax.text(0.5,0.5,'Sin datos',ha='center',va='center');
                 self.ax_text.clear(); self.ax_text.text(0.5,0.5,'Sin datos',ha='center',va='center');
                 return
             N = 16
-            phi = ph % 360.0
-            pos = (phi < 180.0)
-            neg = ~pos
-            # H_amp en panel superior derecho
-            a_pos, _ = np.histogram(amp[pos], bins=N, range=(0.0, 100.0))
-            a_neg, _ = np.histogram(amp[neg], bins=N, range=(0.0, 100.0))
-            Ha_pos = np.log10(1.0 + a_pos.astype(float))
-            Ha_neg = np.log10(1.0 + a_neg.astype(float))
-            m_amp = float(max(Ha_pos.max() if Ha_pos.size else 0.0, Ha_neg.max() if Ha_neg.size else 0.0, 1.0))
-            Ha_pos = Ha_pos / m_amp; Ha_neg = Ha_neg / m_amp
+            hist = compute_semicycle_histograms_from_aligned({"phase_deg": ph_arr, "amplitude": amp_arr}, N=N)
+            Ha_pos = hist.get("H_amp_pos", np.zeros(N))
+            Ha_neg = hist.get("H_amp_neg", np.zeros(N))
+            Hp_pos = hist.get("H_ph_pos", np.zeros(N))
+            Hp_neg = hist.get("H_ph_neg", np.zeros(N))
             xi = np.arange(1, N+1)
             ax.plot(xi, Ha_pos, '-o', color='#1f77b4', label='H_amp+')
             ax.plot(xi, Ha_neg, '-o', color='#d62728', label='H_amp-')
-            ax.set_xlabel('Indice de ventana (N=16)'); ax.set_ylabel('H_amp (norm)'); ax.set_title('Histograma de Amplitud (N=16)')
+
+            # Overlay con bins avanzados (quantity) si existen. Fallos aquí no deben ocultar el histograma base.
+            try:
+                m_adv = r.get("metrics_advanced", {}) if isinstance(r, dict) else {}
+                hist_adv = m_adv.get("hist", {}) if isinstance(m_adv, dict) else {}
+                amp_pos_adv = np.asarray(hist_adv.get("amp_hist_pos", []), dtype=float)
+                amp_edges_pos = np.asarray(hist_adv.get("amp_edges_pos", []), dtype=float)
+                amp_neg_adv = np.asarray(hist_adv.get("amp_hist_neg", []), dtype=float)
+                amp_edges_neg = np.asarray(hist_adv.get("amp_edges_neg", []), dtype=float)
+                if amp_pos_adv.size and amp_edges_pos.size == amp_pos_adv.size + 1:
+                    centers_pos = (amp_edges_pos[:-1] + amp_edges_pos[1:]) / 2.0
+                    max_pos = np.max(amp_pos_adv) if amp_pos_adv.size else 0.0
+                    amp_pos_norm = amp_pos_adv / max_pos if max_pos > 0 else amp_pos_adv
+                    ax.plot(centers_pos, amp_pos_norm, '--', color='#1f77b4', alpha=0.7, label='H_amp+ (bins qty)')
+                if amp_neg_adv.size and amp_edges_neg.size == amp_neg_adv.size + 1:
+                    centers_neg = (amp_edges_neg[:-1] + amp_edges_neg[1:]) / 2.0
+                    max_neg = np.max(amp_neg_adv) if amp_neg_adv.size else 0.0
+                    amp_neg_norm = amp_neg_adv / max_neg if max_neg > 0 else amp_neg_adv
+                    ax.plot(centers_neg, amp_neg_norm, '--', color='#d62728', alpha=0.7, label='H_amp- (bins qty)')
+            except Exception:
+                pass
+
+            ax.set_xlabel('Indice de ventana (N=16) / centros bins'); ax.set_ylabel('H_amp (norm)')
+            ax.set_title('Histograma de Amplitud (N=16 + qty)')
             ax.legend(loc='upper right', fontsize=8)
+
             # H_ph en panel inferior derecho
             bx = self.ax_text
             bx.clear()
-            phi_pos = phi[pos]; phi_neg = (phi[neg] - 180.0)
-            p_pos, _ = np.histogram(phi_pos, bins=N, range=(0.0, 180.0))
-            p_neg, _ = np.histogram(phi_neg, bins=N, range=(0.0, 180.0))
-            Hp_pos = np.log10(1.0 + p_pos.astype(float))
-            Hp_neg = np.log10(1.0 + p_neg.astype(float))
-            m_ph = float(max(Hp_pos.max() if Hp_pos.size else 0.0, Hp_neg.max() if Hp_neg.size else 0.0, 1.0))
-            Hp_pos = Hp_pos / m_ph; Hp_neg = Hp_neg / m_ph
             bx.plot(xi, Hp_pos, '-o', color='#1f77b4', label='H_ph+')
             bx.plot(xi, Hp_neg, '-o', color='#d62728', label='H_ph-')
-            bx.set_xlabel('Indice de ventana (N=16)'); bx.set_ylabel('H_ph (norm)'); bx.set_title('Histograma de Fase (N=16)')
+
+            try:
+                hist_adv = r.get("metrics_advanced", {}).get("hist", {}) if isinstance(r, dict) else {}
+                ph_edges_adv = np.asarray(hist_adv.get("ph_edges", []), dtype=float)
+                phase_hist_pos = np.asarray(hist_adv.get("phase_hist_pos", []), dtype=float)
+                phase_hist_neg = np.asarray(hist_adv.get("phase_hist_neg", []), dtype=float)
+                if ph_edges_adv.size and phase_hist_pos.size:
+                    mid = len(ph_edges_adv) // 2
+                    if mid > 0:
+                        centers_pos = (ph_edges_adv[:mid] + ph_edges_adv[1:mid+1]) / 2.0
+                        max_ph_pos = np.max(phase_hist_pos) if phase_hist_pos.size else 0.0
+                        ph_pos_norm = phase_hist_pos / max_ph_pos if max_ph_pos > 0 else phase_hist_pos
+                        bx.plot(centers_pos, ph_pos_norm, '--', color='#1f77b4', alpha=0.7, label='H_ph+ (bins)')
+                if ph_edges_adv.size and phase_hist_neg.size:
+                    mid = len(ph_edges_adv) // 2
+                    if mid > 0:
+                        edges_neg = ph_edges_adv[mid:]
+                        if edges_neg.size >= 2:
+                            centers_neg = (edges_neg[:-1] + edges_neg[1:]) / 2.0
+                            centers_neg = centers_neg - 180.0
+                            max_ph_neg = np.max(phase_hist_neg) if phase_hist_neg.size else 0.0
+                            ph_neg_norm = phase_hist_neg / max_ph_neg if max_ph_neg > 0 else phase_hist_neg
+                            bx.plot(centers_neg, ph_neg_norm, '--', color='#d62728', alpha=0.7, label='H_ph- (bins)')
+            except Exception:
+                pass
+
+            bx.set_xlabel('Indice de ventana (N=16) / centros bins'); bx.set_ylabel('H_ph (norm)')
+            bx.set_title('Histograma de Fase (N=16 + bins)')
             bx.legend(loc='upper right', fontsize=8)
         except Exception:
             ax.text(0.5,0.5,'Error histogramas',ha='center',va='center');
@@ -2264,36 +2542,60 @@ class PRPDWindow(QMainWindow):
             probs[key] = max(0.0, float(probs[key]) / total)
         return probs
 
-    def _draw_ann_prediction_panel(self, result: dict, summary: dict, metrics: dict | None = None) -> None:
+    def _draw_ann_prediction_panel(self, result: dict, summary: dict, metrics: dict | None = None, metrics_adv: dict | None = None) -> None:
         ax = self.ax_raw
         ax.clear()
         ax.set_facecolor("#f3f6fb")
         metrics = metrics or {}
+        metrics_adv = metrics_adv or result.get("metrics_advanced") or {}
         mask_label = (self.last_run_profile or {}).get("mask", self.cmb_masks.currentText())
-        ann_probs = self._last_ann_probs or self._infer_ann_probabilities(metrics, summary, mask_label)
+        heur_probs = {}
+        try:
+            heur_probs = metrics_adv.get("heuristic_probs") or {}
+        except Exception:
+            heur_probs = {}
+
+        ann_probs = {}
+        if heur_probs:
+            ann_probs = {str(k).lower(): float(v) for k, v in heur_probs.items() if v is not None}
+        else:
+            ann_probs = self._last_ann_probs or self._infer_ann_probabilities(metrics, summary, mask_label)
         ann_norm = {str(k).lower(): float(v) for k, v in ann_probs.items() if v is not None}
-        labels = ["Corona +/-", "Superficial / Tracking", "Cavidad"]
-        color_map = ["#FFB300", "#1565c0", "#8E44AD"]
-        keys = ["corona", "superficial", "cavidad"]
-        values = [ann_norm.get(k, 0.0) for k in keys]
+
+        # Orden principal de barras (sin duplicar corona si viene agregada)
+        bar_keys = list(self.pd_classes or CLASS_NAMES)
+        labels = []
+        colors = []
+        values = []
+        for k in bar_keys:
+            info = CLASS_INFO.get(k, {"name": k, "color": "#888888"})
+            labels.append(info.get("name", k))
+            colors.append(info.get("color", "#888888"))
+            values.append(ann_norm.get(k, 0.0))
+
+        # Fallback si todo está en cero
         if not any(values):
             inferred = (summary.get("pd_type") or "").lower()
             if "superficial" in inferred or "tracking" in inferred:
-                values[1] = 1.0
-            elif "corona" in inferred and "-" in inferred:
-                values[2] = 1.0
+                values[bar_keys.index("superficial")] = 1.0
             elif "corona" in inferred:
-                values[0] = 1.0
+                values[bar_keys.index("corona")] = 1.0
             elif "cavidad" in inferred:
-                values[3] = 1.0
+                values[bar_keys.index("cavidad")] = 1.0
             else:
-                values[3] = 0.5
+                values[bar_keys.index("ruido")] = 0.5
+
         values = [max(0.0, float(v)) for v in values]
         total = sum(values)
         if total <= 0:
             total = 1.0
         values = [min(1.0, max(0.0, v / total)) for v in values]
-        bars = ax.bar(labels, values, color=color_map, edgecolor="#37474f", linewidth=1.0)
+        try:
+            self._last_ann_probs = {k: v for k, v in zip(bar_keys, values)}
+        except Exception:
+            pass
+
+        bars = ax.bar(labels, values, color=colors, edgecolor="#37474f", linewidth=1.0)
         ax.set_ylim(0, 1.05)
         ax.set_ylabel("Probabilidad")
         ax.set_title("ANN Predicted PD Source", fontweight="bold")
@@ -2536,7 +2838,12 @@ class PRPDWindow(QMainWindow):
                     gx = getattr(self, "_gap_xml_path", None)
                     if gx:
                         gap_stats = self._compute_gap(gx)
-            metrics = logic_compute_pd_metrics(result, gap_stats=gap_stats)
+            # Reusar métricas si ya existen; si no, calcúlalas
+            metrics = result.get("metrics") if isinstance(result, dict) else None
+            if not metrics:
+                metrics = logic_compute_pd_metrics(result, gap_stats=gap_stats)
+                if isinstance(result, dict):
+                    result["metrics"] = metrics
         except Exception:
             metrics = {}
         if not metrics.get("total_count"):
@@ -2548,6 +2855,7 @@ class PRPDWindow(QMainWindow):
             "phase_offset": result.get("phase_offset"),
             "filter": self._get_filter_label(),
             "gap": gap_stats or {},
+            "metrics_advanced": result.get("metrics_advanced", {}),
         }
         def fmt(key, prec=1):
             val = metrics.get(key)
@@ -2595,6 +2903,7 @@ class PRPDWindow(QMainWindow):
         is_ann_gap = view_mode.startswith("ann")
         is_gap_ext = view_mode.startswith("gap-time extenso")
         is_gap_full = view_mode.startswith("gap-time") and not is_gap_ext
+        is_kpi_adv = view_mode.startswith("kpi avanzados")
 
         text, payload = self._get_conclusion_insight(r)
         payload = payload or {}
@@ -2628,6 +2937,10 @@ class PRPDWindow(QMainWindow):
             return
         if is_gap_ext:
             self._render_gap_time_extenso()
+            self.canvas.draw_idle()
+            return
+        if is_kpi_adv:
+            self._render_kpi_avanzados(r, payload)
             self.canvas.draw_idle()
             return
 
@@ -2666,6 +2979,7 @@ class PRPDWindow(QMainWindow):
             self.last_qty_deciles = qty_deciles
         else:
             self.last_qty_deciles = None
+        # Paleta fija para Q1..Q5 (coincide con la macro de Excel)
         quint_colors = {
             1: "#0066CC",  # Azul
             2: "#009900",  # Verde
@@ -2980,7 +3294,7 @@ class PRPDWindow(QMainWindow):
         centers_for_save = selected_s3 if self.chk_centers_combined.isChecked() else None
         self._save_combined_overlays(ph_al, amp_al, ang, session_dir / f"{stem}_combined_{profile_tag}.png", centers=centers_for_save)
         self._save_gap_outputs(gap_stats, metrics, session_dir, stem, profile_tag)
-        self._save_ann_prediction_plot(metrics, summary, session_dir, stem, profile_tag)
+        self._save_ann_prediction_plot(metrics, summary, session_dir, stem, profile_tag, metrics_adv=result.get("metrics_advanced"))
         self._save_conclusions(result, session_dir, stem, profile_tag)
 
     def _save_prpd_plot(self, ph: np.ndarray, amp: np.ndarray, path: Path, *, title: str, hist2d: bool, quintiles: np.ndarray | None = None) -> None:
@@ -3219,23 +3533,48 @@ class PRPDWindow(QMainWindow):
         fig.savefig(session_dir / f"{stem}_conclusiones_{suffix}.png", bbox_inches="tight")
         _plt.close(fig)
 
-    def _save_ann_prediction_plot(self, metrics: dict, summary: dict, session_dir: Path, stem: str, suffix: str) -> None:
-        """Guarda la barra ANN de predicción de fuente PD."""
+    def _save_ann_prediction_plot(self, metrics: dict, summary: dict, session_dir: Path, stem: str, suffix: str, *, metrics_adv: dict | None = None) -> None:
+        """Guarda la barra ANN/heurística de predicción de fuente PD."""
         import matplotlib.pyplot as _plt
         session_dir = Path(session_dir)
         mask_label = (self.last_run_profile or {}).get("mask", self.cmb_masks.currentText())
-        ann_probs = self._last_ann_probs or self._infer_ann_probabilities(metrics, summary, mask_label)
+        heur_probs = (metrics_adv or {}).get("heuristic_probs") if isinstance(metrics_adv, dict) else {}
+        ann_probs = {}
+        if heur_probs:
+            ann_probs = {str(k).lower(): float(v) for k, v in heur_probs.items() if v is not None}
+        else:
+            ann_probs = self._last_ann_probs or self._infer_ann_probabilities(metrics, summary, mask_label)
         ann_norm = {str(k).lower(): float(v) for k, v in ann_probs.items() if v is not None}
-        labels = ["Corona +/-", "Superficial / Tracking", "Cavidad"]
-        color_map = ["#FFB300", "#1565c0", "#8E44AD"]
-        keys = ["corona", "superficial", "cavidad"]
-        values = [ann_norm.get(k, 0.0) for k in keys]
+
+        bar_keys = list(self.pd_classes or CLASS_NAMES)
+        labels = []
+        color_map = []
+        values = []
+        for k in bar_keys:
+            info = CLASS_INFO.get(k, {"name": k, "color": "#888888"})
+            labels.append(info.get("name", k))
+            color_map.append(info.get("color", "#888888"))
+            values.append(ann_norm.get(k, 0.0))
+
         values = [max(0.0, float(v)) for v in values]
         total = sum(values)
         if total <= 0:
+            # fallback con summary
+            inferred = (summary.get("pd_type") or "").lower()
+            if "superficial" in inferred or "tracking" in inferred:
+                values[bar_keys.index("superficial")] = 1.0
+            elif "corona" in inferred:
+                values[bar_keys.index("corona")] = 1.0
+            elif "cavidad" in inferred:
+                values[bar_keys.index("cavidad")] = 1.0
+            else:
+                values[bar_keys.index("ruido")] = 0.5
+            total = sum(values)
+        if total <= 0:
             total = 1.0
         values = [min(1.0, max(0.0, v / total)) for v in values]
-        fig, ax = _plt.subplots(figsize=(6, 3.5), dpi=130)
+
+        fig, ax = _plt.subplots(figsize=(7.5, 4.0), dpi=130)
         bars = ax.bar(labels, values, color=color_map, edgecolor="#37474f", linewidth=1.0)
         ax.set_ylim(0, 1.05)
         ax.set_ylabel("Probabilidad")
@@ -3363,18 +3702,12 @@ class PRPDWindow(QMainWindow):
             import matplotlib.pyplot as _plt
             import numpy as _np
             N = 16
-            phi = ph % 360.0
-            pos = (phi < 180.0)
-            neg = ~pos
+            hist = compute_semicycle_histograms_from_aligned({"phase_deg": ph, "amplitude": amp}, N=N)
             xi = _np.arange(1, N + 1)
-            # Histogramas de amplitud
-            a_pos, _ = _np.histogram(amp[pos], bins=N, range=(0.0, 100.0))
-            a_neg, _ = _np.histogram(amp[neg], bins=N, range=(0.0, 100.0))
-            Ha_pos = _np.log10(1.0 + a_pos.astype(float))
-            Ha_neg = _np.log10(1.0 + a_neg.astype(float))
-            m = float(max(Ha_pos.max() if Ha_pos.size else 0.0, Ha_neg.max() if Ha_neg.size else 0.0, 1.0))
-            Ha_pos /= m
-            Ha_neg /= m
+            Ha_pos = hist.get("H_amp_pos", _np.zeros(N))
+            Ha_neg = hist.get("H_amp_neg", _np.zeros(N))
+            Hp_pos = hist.get("H_ph_pos", _np.zeros(N))
+            Hp_neg = hist.get("H_ph_neg", _np.zeros(N))
             fig, ax = _plt.subplots(figsize=(5, 3), dpi=120)
             ax.plot(xi, Ha_pos, '-o', label='H_amp+')
             ax.plot(xi, Ha_neg, '-o', label='H_amp-')
@@ -3392,16 +3725,6 @@ class PRPDWindow(QMainWindow):
                 _np.savetxt(out_reports / f"{stem}_hist_amp_{suffix}.csv", data_amp, delimiter=",", header=header_amp, comments="")
             except Exception:
                 traceback.print_exc()
-            # Histogramas de fase
-            phi_pos = phi[pos]
-            phi_neg = (phi[neg] - 180.0)
-            p_pos, _ = _np.histogram(phi_pos, bins=N, range=(0.0, 180.0))
-            p_neg, _ = _np.histogram(phi_neg, bins=N, range=(0.0, 180.0))
-            Hp_pos = _np.log10(1.0 + p_pos.astype(float))
-            Hp_neg = _np.log10(1.0 + p_neg.astype(float))
-            m2 = float(max(Hp_pos.max() if Hp_pos.size else 0.0, Hp_neg.max() if Hp_neg.size else 0.0, 1.0))
-            Hp_pos /= m2
-            Hp_neg /= m2
             fig, ax = _plt.subplots(figsize=(5, 3), dpi=120)
             ax.plot(xi, Hp_pos, '-o', label='H_ph+')
             ax.plot(xi, Hp_neg, '-o', label='H_ph-')
@@ -3517,12 +3840,24 @@ class PRPDWindow(QMainWindow):
                             path=Path(xp),
                             out_root=out_dir,
                             force_phase_offsets=force_offsets,
-                        fast_mode=fast_mode,
-                        filter_level=flabel,
-                        phase_mask=mask_ranges,
-                        pixel_deciles_keep=pixel_deciles,
-                        qty_deciles_keep=qty_deciles,
-                    )
+                            fast_mode=fast_mode,
+                            filter_level=flabel,
+                            phase_mask=mask_ranges,
+                            pixel_deciles_keep=pixel_deciles,
+                        )
+                        try:
+                            self._precompute_qty_buckets(res)
+                            self._apply_qty_filters(res, qty_quints, qty_deciles)
+                            bins_phase = getattr(self, "_hist_bins_phase", 32)
+                            bins_amp = getattr(self, "_hist_bins_amp", 32)
+                            res["metrics_advanced"] = compute_advanced_metrics(
+                                {"aligned": res.get("aligned", {}), "angpd": res.get("angpd", {})},
+                                bins_amp=bins_amp,
+                                bins_phase=bins_phase,
+                            )
+                            res["metrics"] = logic_compute_pd_metrics(res, gap_stats=res.get("gap_stats"))
+                        except Exception:
+                            pass
                         # Guardar resultados básicos para el summary
                         if suf == "weak":
                             line = f"[{i:03d}/{len(xmls):03d}] {xp.name} -> {res.get('predicted','?')} | sev={res.get('severity_score',0):.1f} | clusters={res.get('n_clusters',0)} | ruido={'Sí' if res.get('has_noise') else 'No'}"

@@ -23,7 +23,13 @@ def render_nubes_grid(wnd, ph_al, amp_al, quint_idx, clouds_s3, clouds_s4, cloud
     else:
         wnd.ax_raw.set_facecolor("#ffffff")
         if quint_idx is not None and ph_al.size and amp_al.size:
-            quint_colors = {1: "#1f77b4", 2: "#2ca02c", 3: "#ffbb33", 4: "#ff7f0e", 5: "#c62828"}
+            quint_colors = {
+                1: "#0066CC",  # Azul
+                2: "#009900",  # Verde
+                3: "#FFCC00",  # Amarillo
+                4: "#FF8000",  # Naranja
+                5: "#CC0000",  # Rojo
+            }
             used = False
             for q_idx in range(1, 6):
                 mask = quint_idx == q_idx
@@ -104,6 +110,9 @@ def render_conclusions(wnd, result: dict, payload: dict | None = None) -> None:
 
     summary = payload.get("summary", {}) if isinstance(payload, dict) else {}
     metrics = payload.get("metrics", {}) if isinstance(payload, dict) else {}
+    metrics_adv = payload.get("metrics_advanced", {}) if isinstance(payload, dict) else {}
+    if not metrics_adv:
+        metrics_adv = result.get("metrics_advanced", {})
     manual = wnd.manual_override if getattr(wnd, "manual_override", {}).get("enabled") else None
     gap_stats = payload.get("gap") if isinstance(payload, dict) else None
 
@@ -168,11 +177,13 @@ def render_conclusions(wnd, result: dict, payload: dict | None = None) -> None:
         if value is None:
             return "N/D"
         try:
+            if isinstance(value, (float, np.floating)) and np.isnan(value):
+                return "N/D"
             if isinstance(value, (int, np.integer)):
                 return f"{int(value):,}{suffix}"
             return f"{float(value):.{decimals}f}{suffix}"
         except Exception:
-            return f"{value}"
+            return "N/D"
 
     def _fmt_angle(value):
         if value is None or value == "N/D":
@@ -204,6 +215,18 @@ def render_conclusions(wnd, result: dict, payload: dict | None = None) -> None:
     gap_p50 = metrics.get("gap_p50")
     gap_p5 = metrics.get("gap_p5")
 
+    # Métricas avanzadas (skew/kurt/correlación/medianas, etc.)
+    m_adv = metrics_adv or {}
+    skew_pos = m_adv.get("skewness", {}).get("pos_skew")
+    skew_neg = m_adv.get("skewness", {}).get("neg_skew")
+    kurt_pos = m_adv.get("kurtosis", {}).get("pos_kurt")
+    kurt_neg = m_adv.get("kurtosis", {}).get("neg_kurt")
+    corr_phase = m_adv.get("phase_corr")
+    med_pos = m_adv.get("phase_medians_p95", {}).get("median_pos_phase")
+    med_neg = m_adv.get("phase_medians_p95", {}).get("median_neg_phase")
+    p95_adv = m_adv.get("phase_medians_p95", {}).get("p95_amp")
+    pulses_ratio = m_adv.get("pulses_ratio")
+
     triplets = [
         ("Total pulsos utiles",
          _fmt_value(metrics.get("total_count"), decimals=0),
@@ -233,11 +256,53 @@ def render_conclusions(wnd, result: dict, payload: dict | None = None) -> None:
          None,
          False,
          0.26),
+        ("Skewness (fase)",
+         "-",
+         _fmt_value(skew_pos, decimals=2),
+         _fmt_value(skew_neg, decimals=2),
+         None,
+         False,
+         0.26),
+        ("Kurtosis (fase)",
+         "-",
+         _fmt_value(kurt_pos, decimals=2),
+         _fmt_value(kurt_neg, decimals=2),
+         None,
+         False,
+         0.26),
+        ("Mediana fase",
+         "-",
+         _fmt_angle(med_pos),
+         _fmt_angle(med_neg),
+         None,
+         False,
+         0.26),
         ("P95 amplitud",
          _fmt_value(metrics.get("p95_mean")),
          _fmt_value(metrics.get("amp_p95_pos")),
          _fmt_value(metrics.get("amp_p95_neg")),
          wnd._status_from_amp(metrics.get("p95_mean")),
+         False,
+         0.26),
+        ("P95 amplitud (qty)",
+         _fmt_value(p95_adv),
+         "-",
+         "-",
+         None,
+         False,
+         0.26),
+        ("Correlacion fases",
+         _fmt_value(corr_phase, decimals=2),
+         "-",
+         "-",
+         None,
+         False,
+         0.26),
+        ("Pulsos N+/N-",
+         _fmt_value(pulses_ratio, decimals=3),
+         "-",
+         "-",
+         None,
          False,
          0.26),
     ]
@@ -377,6 +442,17 @@ def render_conclusions(wnd, result: dict, payload: dict | None = None) -> None:
     action_color = manual.get("action_reco_color", "#0d47a1") if manual else "#0d47a1"
     y_right = _render_action_badges(right_ax, y_right, "ACCIÓN RECOMENDADA", action_general, action_color) - 0.04
 
+    # Indicadores avanzados (skew/kurt/corr/medianas)
+    y_right = wnd._draw_section_title(right_ax, "Indicadores avanzados", y=y_right - 0.02)
+    adv_rows = [
+        ("Skewness ±", f"{_fmt_value(skew_pos, decimals=2)} / {_fmt_value(skew_neg, decimals=2)}"),
+        ("Kurtosis ±", f"{_fmt_value(kurt_pos, decimals=2)} / {_fmt_value(kurt_neg, decimals=2)}"),
+        ("Correlación fases", _fmt_value(corr_phase, decimals=2)),
+        ("Mediana fase ±", f"{_fmt_angle(med_pos)} / {_fmt_angle(med_neg)}"),
+    ]
+    for label, val in adv_rows:
+        y_right = _draw_right_row(right_ax, y_right, label, val, color="#4b5563", text_color="#ffffff")
+
     if gap_info:
         gap_text = manual.get("action_gap") if manual else None
         gap_color = manual.get("action_gap_color", gap_info.get("color", "#00B050")) if manual else gap_info.get("color", "#00B050")
@@ -394,12 +470,8 @@ def render_conclusions(wnd, result: dict, payload: dict | None = None) -> None:
         try:
             ann_norm = {str(k).lower(): float(v) for k, v in ann_probs.items() if v is not None}
             dom_key = max(ann_norm, key=ann_norm.get)
-            if dom_key.startswith("cavidad"):
-                pd_type = "Cavidad interna"; location = "Volumen interno del aislamiento"
-            elif dom_key.startswith("super"):
-                pd_type = "Superficial / Tracking"; location = "Superficie de aislamiento e interfaces"
-            elif dom_key.startswith("corona"):
-                pd_type = "Corona"; location = "Puntos vivos expuestos al aire"
+            if dom_key in CLASS_INFO:
+                pd_type = CLASS_INFO[dom_key].get("name", pd_type)
         except Exception:
             pass
     if isinstance(stage, str) and stage.lower().startswith("evoluc"):
@@ -420,11 +492,14 @@ def render_ann_gap_view(wnd, result: dict, payload: dict | None = None) -> None:
     if not gap_stats:
         gap_stats = result.get("gap_stats")
     metrics = payload.get("metrics", {}) if isinstance(payload, dict) else {}
+    metrics_adv = payload.get("metrics_advanced", {}) if isinstance(payload, dict) else {}
+    if not metrics_adv:
+        metrics_adv = result.get("metrics_advanced", {})
 
     wnd.ax_gap_wide.set_visible(False)
     wnd.ax_raw.set_visible(True)
     wnd.ax_raw.set_axis_on()
-    wnd._draw_ann_prediction_panel(result, summary, metrics)
+    wnd._draw_ann_prediction_panel(result, summary, metrics, metrics_adv)
 
     wnd.ax_filtered.set_visible(True)
     wnd.ax_filtered.set_axis_on()
