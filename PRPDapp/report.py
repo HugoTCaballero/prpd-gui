@@ -8,6 +8,7 @@ import numpy as np
 from matplotlib.backends.backend_pdf import PdfPages
 from matplotlib.figure import Figure
 from PRPDapp.config_pd import CLASS_NAMES, CLASS_INFO
+from PRPDapp.conclusion_rules import build_conclusion_block
 
 def _page_title(fig: Figure, title: str, subtitle: str = ""):
     ax = fig.add_subplot(111)
@@ -48,6 +49,15 @@ def export_pdf_report(result: dict, out_root: Path) -> Path:
 
         # resumen (usa rule_pd si está disponible)
         rule = result.get("rule_pd", {}) if isinstance(result, dict) else {}
+        try:
+            conclusion_block = result.get("conclusion_block", {}) if isinstance(result, dict) else {}
+        except Exception:
+            conclusion_block = {}
+        if not conclusion_block:
+            try:
+                conclusion_block = build_conclusion_block(result if isinstance(result, dict) else {}, rule)
+            except Exception:
+                conclusion_block = {}
         items = [
             ("Modo dominante", rule.get("class_label") or result.get("predicted", "N/D")),
             ("Etapa", rule.get("stage", "N/D")),
@@ -82,6 +92,41 @@ def export_pdf_report(result: dict, out_root: Path) -> Path:
         fig = Figure(figsize=(8.27, 11.69), dpi=120)
         _page_table(fig, "KPIs consolidados", kpi_items)
         pdf.savefig(fig); fig.clear()
+
+        # Conclusiones estandarizadas
+        if conclusion_block:
+            fig = Figure(figsize=(8.27, 11.69), dpi=120)
+            ax = fig.add_subplot(111)
+            ax.axis("off")
+            ax.text(0.02, 0.94, "Conclusiones (aceite sumergido)", fontsize=16, weight="bold", va="top")
+            y = 0.86
+            conc_items = [
+                ("Modo dominante", conclusion_block.get("dominant_discharge", "N/D")),
+                ("Riesgo", conclusion_block.get("risk_level", "N/D")),
+                ("Etapa (regla)", conclusion_block.get("rule_pd_stage", "N/D")),
+                ("Vida (banda)", conclusion_block.get("lifetime_score_band", "N/D")),
+                ("Vida (texto)", conclusion_block.get("lifetime_score_text", "N/D")),
+                ("Ubicación", conclusion_block.get("location_hint", "N/D")),
+                ("FA", conclusion_block.get("fa_value", "N/D")),
+                ("Evolución", conclusion_block.get("evolution_stage", "N/D")),
+            ]
+            for k, v in conc_items:
+                ax.text(0.04, y, f"{k}:", fontsize=11, weight="bold", va="top")
+                ax.text(0.42, y, str(v), fontsize=11, va="top")
+                y -= 0.06
+            actions = conclusion_block.get("actions")
+            action_list = []
+            if isinstance(actions, str):
+                action_list = [a.strip() for a in actions.split(".") if a.strip()]
+            elif isinstance(actions, list):
+                action_list = [str(a).strip() for a in actions if a]
+            if action_list:
+                ax.text(0.02, y - 0.02, "Acciones sugeridas:", fontsize=12, weight="bold", va="top")
+                y -= 0.10
+                for act in action_list[:5]:
+                    ax.text(0.04, y, f"• {act}", fontsize=10, va="top")
+                    y -= 0.055
+            pdf.savefig(fig); fig.clear()
 
         # figuras
         fig = Figure(figsize=(8.27, 11.69), dpi=120); gs = fig.add_gridspec(2,2, hspace=0.28, wspace=0.20)

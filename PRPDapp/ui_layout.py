@@ -185,7 +185,7 @@ def build_bottom_area(wnd):
 
 def build_figures(wnd):
     """Crea la figura principal y ejes; retorna (fig, canvas)."""
-    fig = Figure(figsize=(10, 6), dpi=100, constrained_layout=True)
+    fig = Figure(figsize=(10, 6), dpi=100, constrained_layout=False)
     canvas = FigureCanvas(fig)
     wnd._gs_main = fig.add_gridspec(2, 2, height_ratios=[1, 1])
     wnd.ax_raw = fig.add_subplot(wnd._gs_main[0, 0])
@@ -203,6 +203,11 @@ def build_figures(wnd):
     wnd.ax_conclusion_box.set_visible(False)
     try:
         wnd.ax_conclusion_box.set_in_layout(False)
+    except Exception:
+        pass
+    # Ajuste inicial consistente para evitar desalineaciones entre cuadrantes
+    try:
+        fig.subplots_adjust(top=0.92, bottom=0.1, left=0.07, right=0.98, hspace=0.28, wspace=0.25)
     except Exception:
         pass
     wnd._conclusion_artists = []

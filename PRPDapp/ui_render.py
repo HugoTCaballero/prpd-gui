@@ -122,6 +122,9 @@ def render_conclusions(wnd, result: dict, payload: dict | None = None) -> None:
     fa_kpis = result.get("fa_kpis", {}) if isinstance(result, dict) else {}
     manual = wnd.manual_override if getattr(wnd, "manual_override", {}).get("enabled") else None
     gap_stats = payload.get("gap") if isinstance(payload, dict) else None
+    conclusion_block = payload.get("conclusion_block", {}) if isinstance(payload, dict) else {}
+    if not conclusion_block and isinstance(result, dict):
+        conclusion_block = result.get("conclusion_block", {})
 
     wnd.ax_gap_wide.set_visible(False)
     for ax_top in (wnd.ax_raw, wnd.ax_filtered):
@@ -150,12 +153,15 @@ def render_conclusions(wnd, result: dict, payload: dict | None = None) -> None:
     palette = {
         "critico": "#B00000",
         "crítico": "#B00000",
+        "critica": "#B00000",
         "alta": "#B00000",
         "alto": "#B00000",
+        "media": "#1565c0",
         "grave": "#FF8C00",
         "moderado": "#1565c0",
         "leve": "#1565c0",
         "bajo": "#00B050",
+        "baja": "#00B050",
         "aceptable": "#00B050",
         "incipiente": "#00B050",
         "descargas parciales no detectadas": "#00B050",
@@ -183,6 +189,10 @@ def render_conclusions(wnd, result: dict, payload: dict | None = None) -> None:
     def _fmt_value(value, decimals=1, suffix=""):
         if value is None:
             return "N/D"
+        if isinstance(value, str):
+            val = value.strip().lower()
+            if val in ("", "nd", "n/d", "n/a", "-", "nan"):
+                return "N/D"
         try:
             if isinstance(value, (float, np.floating)) and np.isnan(value):
                 return "N/D"
@@ -441,76 +451,51 @@ def render_conclusions(wnd, result: dict, payload: dict | None = None) -> None:
         return y_val - 0.08
 
     header_y = wnd._draw_section_title(right_ax, "Seguimiento y criticidad", y=0.96)
-    # Modo dominante / ubicación / etapa / severidad / riesgo / lifetime desde rule_pd
-    dom_pd = rule_pd.get("class_label") or rule_pd.get("dominant_pd") or summary.get("pd_type") or "N/D"
-    location = rule_pd.get("location_hint", "N/D")
-    stage = rule_pd.get("stage", "N/D")
-    sev_level = rule_pd.get("severity_level", "N/D")
+    # Modo dominante / ubicacion / etapa / severidad / riesgo / lifetime con prioridad al bloque de conclusiones
+    dom_pd = conclusion_block.get("dominant_discharge") or rule_pd.get("class_label") or rule_pd.get("dominant_pd") or summary.get("pd_type") or "N/D"
+    location = conclusion_block.get("location_hint") or rule_pd.get("location_hint", "N/D")
+    stage = conclusion_block.get("rule_pd_stage") or rule_pd.get("stage", "N/D")
+    sev_level = rule_pd.get("severity_level") or summary.get("risk") or "N/D"
     sev_idx = rule_pd.get("severity_index")
-    risk_label = rule_pd.get("risk_level", summary.get("risk", "N/D"))
-    lifetime_score = rule_pd.get("lifetime_score")
-    lifetime_band = rule_pd.get("lifetime_band")
-    lifetime_text = rule_pd.get("lifetime_text")
-    actions = rule_pd.get("actions") or []
-    explanation = rule_pd.get("explanation") or []
-
-    # Bloque de encabezado en right card
-    hdr_y = wnd._draw_section_title(right_ax, "Diagnóstico", y=0.96)
-    right_ax.text(0.02, hdr_y - 0.04, f"Modo dominante: {dom_pd}", fontsize=11, fontweight="bold", ha="left")
-    right_ax.text(0.02, hdr_y - 0.10, f"Ubicación probable: {location}", fontsize=10, ha="left")
-    right_ax.text(0.02, hdr_y - 0.16, f"Etapa: {stage}", fontsize=10, ha="left")
-    if sev_idx is not None:
-        right_ax.text(0.02, hdr_y - 0.22, f"Severidad: {sev_level} (Índice {sev_idx:.1f}/10)", fontsize=10, ha="left")
+    risk_label = conclusion_block.get("risk_level") or rule_pd.get("risk_level", summary.get("risk", "N/D"))
+    lifetime_score = conclusion_block.get("lifetime_score") or rule_pd.get("lifetime_score")
+    lifetime_band = conclusion_block.get("lifetime_score_band") or rule_pd.get("lifetime_band")
+    lifetime_text = conclusion_block.get("lifetime_score_text") or rule_pd.get("lifetime_text")
+    actions_block = conclusion_block.get("actions")
+    if isinstance(actions_block, str):
+        actions_list = [a.strip() for a in actions_block.split(".") if a.strip()]
+    elif isinstance(actions_block, list):
+        actions_list = actions_block
     else:
-        right_ax.text(0.02, hdr_y - 0.22, f"Severidad: {sev_level}", fontsize=10, ha="left")
-    hdr_y = hdr_y - 0.26
-
-    # Resumen LifeTime
-    if lifetime_score is not None:
-        lt_line = f"LifeTime score: {lifetime_score}/100"
-        if lifetime_band:
-            lt_line += f" ({lifetime_band})"
-        wnd._draw_status_tag(right_ax, lt_line, 0.02, hdr_y, color="#0d47a1", text_color="#ffffff")
-        hdr_y -= 0.10
-        if lifetime_text:
-            wnd._register_conclusion_artist(right_ax.text(0.02, hdr_y, lifetime_text, fontsize=9, ha="left", wrap=True))
-            hdr_y -= 0.12
-
-    # Acciones recomendadas
-    if actions:
-        hdr_y = wnd._draw_section_title(right_ax, "Acciones recomendadas", y=hdr_y - 0.02)
-        y_act = hdr_y - 0.04
-        for act in actions[:4]:
-            right_ax.text(0.03, y_act, f"• {act}", fontsize=9, ha="left")
-            y_act -= 0.06
-        hdr_y = y_act - 0.02
-
-    # Explicación resumida
-    if explanation:
-        hdr_y = wnd._draw_section_title(right_ax, "Resumen de reglas", y=hdr_y - 0.02)
-        y_exp = hdr_y - 0.04
-        for line in explanation[:4]:
-            right_ax.text(0.03, y_exp, f"- {line}", fontsize=9, ha="left", wrap=True)
-            y_exp -= 0.055
-        hdr_y = y_exp - 0.02
+        actions_list = []
+    if not actions_list:
+        fallback_actions = summary.get("actions")
+        if isinstance(fallback_actions, list):
+            actions_list = fallback_actions
+        elif isinstance(fallback_actions, str) and fallback_actions.strip():
+            actions_list = [fallback_actions.strip()]
+        else:
+            actions_list = rule_pd.get("actions") or []
+    explanation = rule_pd.get("explanation") or []
 
     risk_key = risk_label.lower() if isinstance(risk_label, str) else ""
     estado_map = {
         "bajo": ("Aceptable", "#00B050"),
+        "baja": ("Baja", "#00B050"),
+        "media": ("Media", "#1565c0"),
         "moderado": ("Moderado", "#1565c0"),
+        "alta": ("Alta", "#FF8C00"),
         "alto": ("Grave", "#FF8C00"),
         "grave": ("Grave", "#FF8C00"),
-        "critico": ("Crítico", "#B00000"),
-        "crítico": ("Crítico", "#B00000"),
+        "critico": ("Critico", "#B00000"),
+        "critica": ("Critico", "#B00000"),
         "incipiente": ("Incipiente", "#00B050"),
         "descargas parciales no detectadas": ("Sin descargas", "#00B050"),
         "sin descargas": ("Sin descargas", "#00B050"),
     }
     estado_general, risk_color = estado_map.get(risk_key, (risk_label if isinstance(risk_label, str) else "N/D", palette.get(risk_key, "#00B050")))
-    # LifeScore desde rule_pd
-    life_score = lifetime_score
-    y_right = header_y - 0.03
-    life_txt = f"{life_score:.1f}" if isinstance(life_score, (int, float)) else "N/D"
+    life_score_val = lifetime_score
+    life_txt = f"{life_score_val:.1f}" if isinstance(life_score_val, (int, float)) else "N/D"
     vida_txt = lifetime_band or "N/D"
     if manual:
         estado_general = manual.get("header_risk") or estado_general
@@ -518,35 +503,53 @@ def render_conclusions(wnd, result: dict, payload: dict | None = None) -> None:
         vida_txt = manual.get("header_life") or vida_txt
         risk_color = manual.get("header_color", risk_color)
     summary_badge = f"{estado_general}   |   LifeScore: {life_txt}   |   Vida remanente: {vida_txt}"
+    y_right = header_y - 0.03
     wnd._draw_status_tag(right_ax, summary_badge, 0.02, y_right, color=risk_color, text_color="#ffffff", size=12)
-    y_right -= 0.14
+    y_right -= 0.12
 
-    # Acción general / explicación adicional
-    action_general = manual.get("action_reco") if manual else None
-    if not action_general:
-        if actions:
-            action_general = "; ".join(str(a) for a in actions[:3])
-        else:
-            action_general = "Sin acciones registradas."
-    action_color = manual.get("action_reco_color", "#0d47a1") if manual else "#0d47a1"
-    y_right = _render_action_badges(right_ax, y_right, "ACCIÓN RECOMENDADA", action_general, action_color) - 0.04
+    # Fila de modo, ubicacion, etapa, severidad
+    y_right = _draw_right_row(right_ax, y_right, "MODO DOMINANTE", dom_pd, color="#1e88e5", text_color="#ffffff")
+    y_right = _draw_right_row(right_ax, y_right, "UBICACION PROBABLE", location, color="#1e88e5", text_color="#ffffff")
+    y_right = _draw_right_row(right_ax, y_right, "ETAPA", stage, color="#1e88e5", text_color="#ffffff")
+    sev_text = f"{sev_level} (Indice {sev_idx:.1f}/10)" if sev_idx is not None else sev_level
+    y_right = _draw_right_row(right_ax, y_right, "SEVERIDAD", sev_text, color="#1e88e5", text_color="#ffffff")
 
-    # Bloque de explicación breve
+    # Resumen LifeTime
+    if lifetime_score is not None:
+        lt_line = f"LifeTime score: {lifetime_score}/100"
+        if lifetime_band:
+            lt_line += f" ({lifetime_band})"
+        wnd._draw_status_tag(right_ax, lt_line, 0.02, y_right, color="#0d47a1", text_color="#ffffff")
+        y_right -= 0.06
+        if lifetime_text:
+            wnd._register_conclusion_artist(right_ax.text(0.02, y_right - 0.04, lifetime_text, fontsize=9, ha="left", wrap=True))
+            y_right -= 0.12
+
+    # Acciones recomendadas (una sola seccion ordenada)
+    if actions_list:
+        y_right = wnd._draw_section_title(right_ax, "Acciones recomendadas", y=y_right - 0.015)
+        y_act = y_right - 0.035
+        for act in actions_list[:4]:
+            right_ax.text(0.03, y_act, f"• {act}", fontsize=9, ha="left")
+            y_act -= 0.06
+        y_right = y_act - 0.02
+
+    # Explicacion resumida
     if explanation:
-        y_right = wnd._draw_section_title(right_ax, "Explicación", y=y_right)
-        y_txt = y_right - 0.04
-        for line in explanation[:4]:
-            right_ax.text(0.03, y_txt, f"• {line}", fontsize=9, ha="left")
-            y_txt -= 0.06
-        y_right = y_txt - 0.02
+        y_right = wnd._draw_section_title(right_ax, "Resumen de reglas", y=y_right - 0.015)
+        y_exp = y_right - 0.035
+        for line in explanation[:3]:
+            right_ax.text(0.03, y_exp, f"- {line}", fontsize=9, ha="left", wrap=True)
+            y_exp -= 0.05
+        y_right = y_exp - 0.015
 
     # Indicadores avanzados (skew/kurt/corr/medianas)
-    y_right = wnd._draw_section_title(right_ax, "Indicadores avanzados", y=y_right - 0.02)
+    y_right = wnd._draw_section_title(right_ax, "Indicadores avanzados", y=y_right - 0.015)
     adv_rows = [
-        ("Skewness ±", f"{_fmt_value(skew_pos, decimals=2)} / {_fmt_value(skew_neg, decimals=2)}"),
-        ("Kurtosis ±", f"{_fmt_value(kurt_pos, decimals=2)} / {_fmt_value(kurt_neg, decimals=2)}"),
-        ("Correlación fases", _fmt_value(corr_phase, decimals=2)),
-        ("Mediana fase ±", f"{_fmt_angle(med_pos)} / {_fmt_angle(med_neg)}"),
+        ("Skewness +/-", f"{_fmt_value(skew_pos, decimals=2)} / {_fmt_value(skew_neg, decimals=2)}"),
+        ("Kurtosis +/-", f"{_fmt_value(kurt_pos, decimals=2)} / {_fmt_value(kurt_neg, decimals=2)}"),
+        ("Correlacion fases", _fmt_value(corr_phase, decimals=2)),
+        ("Mediana fase +/-", f"{_fmt_angle(med_pos)} / {_fmt_angle(med_neg)}"),
     ]
     for label, val in adv_rows:
         y_right = _draw_right_row(right_ax, y_right, label, val, color="#4b5563", text_color="#ffffff")
@@ -556,12 +559,12 @@ def render_conclusions(wnd, result: dict, payload: dict | None = None) -> None:
         gap_color = manual.get("action_gap_color", gap_info.get("color", "#00B050")) if manual else gap_info.get("color", "#00B050")
         if not gap_text:
             gap_text = gap_info.get("action", "")
-        y_right = _render_action_badges(right_ax, y_right, "ACCIÓN GAP-TIME P50", gap_text, gap_color) - 0.08
+        y_right = _render_action_badges(right_ax, y_right, "ACCION GAP-TIME P50", gap_text, gap_color) - 0.06
 
     rule_pd = result.get("rule_pd", {}) if isinstance(result, dict) else {}
-    stage = (manual.get("stage") if manual else None) or rule_pd.get("stage") or summary.get("stage", "N/D")
-    pd_type = (manual.get("mode") if manual else None) or rule_pd.get("class_label") or summary.get("pd_type", "N/D")
-    location = (manual.get("location") if manual else None) or rule_pd.get("location_hint") or summary.get("location", "N/D")
+    stage_alt = (manual.get("stage") if manual else None) or rule_pd.get("stage") or summary.get("stage", "N/D")
+    pd_type_alt = (manual.get("mode") if manual else None) or rule_pd.get("class_label") or summary.get("pd_type", "N/D")
+    location_alt = (manual.get("location") if manual else None) or rule_pd.get("location_hint") or summary.get("location", "N/D")
     risk_manual_text = (manual.get("risk") if manual else None) or rule_pd.get("risk_level")
 
     ann_probs = wnd._last_ann_probs or {}
@@ -570,16 +573,17 @@ def render_conclusions(wnd, result: dict, payload: dict | None = None) -> None:
             ann_norm = {str(k).lower(): float(v) for k, v in ann_probs.items() if v is not None}
             dom_key = max(ann_norm, key=ann_norm.get)
             if dom_key in CLASS_INFO:
-                pd_type = CLASS_INFO[dom_key].get("name", pd_type)
+                pd_type_alt = CLASS_INFO[dom_key].get("name", pd_type_alt)
         except Exception:
             pass
-    if isinstance(stage, str) and stage.lower().startswith("evoluc"):
-        stage = "Avanzada"
+    if isinstance(stage_alt, str) and stage_alt.lower().startswith("evoluc"):
+        stage_alt = "Avanzada"
 
-    y_right = _draw_right_row(right_ax, y_right, "ETAPA PROBABLE", stage, color=manual.get("stage_color", "#1e88e5") if manual else "#1e88e5")
-    y_right = _draw_right_row(right_ax, y_right, "MODO DOMINANTE", pd_type, color=manual.get("mode_color", "#1e88e5") if manual else "#1e88e5")
-    y_right = _draw_right_row(right_ax, y_right, "UBICACIÓN PROBABLE", location, color=manual.get("location_color", "#1e88e5") if manual else "#1e88e5")
+    y_right = _draw_right_row(right_ax, y_right, "ETAPA PROBABLE", stage_alt, color=manual.get("stage_color", "#1e88e5") if manual else "#1e88e5")
+    y_right = _draw_right_row(right_ax, y_right, "MODO DOMINANTE", pd_type_alt, color=manual.get("mode_color", "#1e88e5") if manual else "#1e88e5")
+    y_right = _draw_right_row(right_ax, y_right, "UBICACION PROBABLE", location_alt, color=manual.get("location_color", "#1e88e5") if manual else "#1e88e5")
     _draw_right_row(right_ax, y_right, "RIESGO", risk_manual_text or risk_label, color=manual.get("risk_color", risk_color) if manual else risk_color)
+
 
 
 def render_ann_gap_view(wnd, result: dict, payload: dict | None = None) -> None:

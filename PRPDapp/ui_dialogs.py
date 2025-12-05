@@ -74,6 +74,10 @@ def open_manual_override_dialog(window, current: dict) -> dict | None:
     form.addRow("Modo dominante:", row_mode)
     form.addRow("Ubicación probable:", row_loc)
     form.addRow("Riesgo:", row_risk)
+    ann_force = QLineEdit(current.get("ann_class", ""))
+    ann_bias = QLineEdit(str(current.get("ann_bias", "1.2")))
+    form.addRow("Forzar clase ANN (corona/superficial/cavidad/flotante/ruido):", ann_force)
+    form.addRow("Peso de forzado ANN (ej. 0.5-2.0):", ann_bias)
 
     layout.addLayout(form)
     self_chk = QCheckBox("Usar estos valores en Conclusiones")
@@ -111,6 +115,7 @@ def open_manual_override_dialog(window, current: dict) -> dict | None:
             "location_color": btn_location.color,
             "risk": risk.text().strip(),
             "risk_color": btn_risk.color,
+            "ann_class": ann_force.text().strip(),
+            "ann_bias": ann_bias.text().strip(),
         }
     return None
-

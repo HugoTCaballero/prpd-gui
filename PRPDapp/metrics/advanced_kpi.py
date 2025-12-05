@@ -1,5 +1,3 @@
-﻿import numpy as np
-
 import numpy as np
 from PRPDapp.config_pd import CLASS_NAMES, CLASS_INFO
 from PRPDapp.logic_hist import compute_semicycle_histograms_from_aligned
@@ -68,11 +66,7 @@ def _count_peaks_1d(arr: np.ndarray) -> int:
 
 
 def compute_advanced_metrics(result: dict, bins_amp: int = 32, bins_phase: int = 32) -> dict:
-    """KPIs avanzados.
-
-    - Histogramas H_amp/H_ph: bins N=16 (o configurables) basados en amplitud/fase.
-    - ANGPD/N-ANGPD: usar SIEMPRE las curvas 1D ya calculadas en result["angpd"].
-    """
+    """KPIs avanzados (ANGPD 2.0 + histogramas)."""
     aligned = result.get("aligned", {}) if isinstance(result, dict) else {}
     ang = result.get("angpd", {}) if isinstance(result, dict) else {}
 
@@ -86,11 +80,15 @@ def compute_advanced_metrics(result: dict, bins_amp: int = 32, bins_phase: int =
     ang_qty = np.asarray(ang.get("angpd_qty", []), dtype=float)
     nang_qty = np.asarray(ang.get("n_angpd_qty", []), dtype=float)
 
+    # Si no hay quantity, usar pesos unitarios para no bloquear los KPIs
+    if not qty.size and ph.size == amp.size and ph.size > 0:
+        qty = np.ones_like(ph, dtype=float)
+
     has_core = ph.size and amp.size and qty.size
     if not has_core and not phi_curve.size:
         return {}
 
-    # Histogramas H_amp/H_ph (lógica centralizada; N=16 por defecto)
+    # Histogramas H_amp/H_ph (logica centralizada; N=16 por defecto)
     hist_h = compute_semicycle_histograms_from_aligned(aligned, N=16)
     phi_mod = ph % 360.0 if ph.size else np.asarray([], dtype=float)
     pos_mask = (phi_mod < 180.0) if phi_mod.size else np.zeros(0, dtype=bool)
@@ -108,38 +106,78 @@ def compute_advanced_metrics(result: dict, bins_amp: int = 32, bins_phase: int =
     qty_neg = float(np.sum(qty[neg_mask])) if neg_mask.any() else 0.0
     pulses_ratio = qty_pos / qty_neg if qty_neg else np.nan
 
-    # KPIs basados en curvas ANGPD ya calculadas (phi_curve vs ang/nang qty)
+    # Histogramas por semiciclo con pesos (para overlay y KPIs faltantes)
+    amp_hist_pos = np.asarray([], dtype=float)
+    amp_hist_neg = np.asarray([], dtype=float)
+    amp_edges_pos = np.asarray([], dtype=float)
+    amp_edges_neg = np.asarray([], dtype=float)
+    phase_hist_pos = np.asarray([], dtype=float)
+    phase_hist_neg = np.asarray([], dtype=float)
+    ph_edges = np.asarray([], dtype=float)
+    try:
+        amp_max_range = float(np.nanmax(amp)) if amp.size else 100.0
+        if not np.isfinite(amp_max_range) or amp_max_range <= 0:
+            amp_max_range = 100.0
+        amp_range = (0.0, max(amp_max_range, 1.0))
+        if pos_mask.any():
+            amp_hist_pos, amp_edges_pos = np.histogram(
+                amp[pos_mask], bins=bins_amp, range=amp_range, weights=qty[pos_mask]
+            )
+        if neg_mask.any():
+            amp_hist_neg, amp_edges_neg = np.histogram(
+                amp[neg_mask], bins=bins_amp, range=amp_range, weights=qty[neg_mask]
+            )
+        if phi_mod.size:
+            phase_hist, ph_edges = np.histogram(
+                phi_mod, bins=bins_phase * 2, range=(0.0, 360.0), weights=qty if qty.size else None
+            )
+            phase_hist_pos = phase_hist[:bins_phase]
+            phase_hist_neg = phase_hist[bins_phase:]
+    except Exception:
+        pass
+
+    # KPIs basados en curvas ANGPD ya calculadas (phi_curve vs ang/nang qty) + fallback por histograma
     peaks_pos = peaks_neg = np.nan
     phase_corr = np.nan
-    if phi_curve.size:
-        # usar n_angpd_qty para morfología de cantidad
+    pos_curve = np.asarray([], dtype=float)
+    neg_curve = np.asarray([], dtype=float)
+    if phi_curve.size and (nang_qty.size or ang_qty.size):
         pos_curve = nang_qty[(phi_curve % 360.0) < 180.0] if nang_qty.size else np.asarray([], dtype=float)
         neg_curve = nang_qty[(phi_curve % 360.0) >= 180.0] if nang_qty.size else np.asarray([], dtype=float)
-        if pos_curve.size:
-            peaks_pos = _count_peaks_1d(pos_curve)
-        if neg_curve.size:
-            peaks_neg = _count_peaks_1d(neg_curve)
-        if pos_curve.size and neg_curve.size and pos_curve.size == neg_curve.size:
-            try:
-                phase_corr = float(np.corrcoef(pos_curve, neg_curve)[0, 1])
-            except Exception:
-                phase_corr = np.nan
+    if not pos_curve.size or not neg_curve.size:
+        try:
+            pos_curve, _ = np.histogram(
+                ph[pos_mask], bins=bins_phase, range=(0.0, 180.0), weights=qty[pos_mask] if qty.size else None
+            ) if pos_mask.any() else (np.asarray([], dtype=float), None)
+            neg_curve, _ = np.histogram(
+                ph[neg_mask], bins=bins_phase, range=(0.0, 180.0), weights=qty[neg_mask] if qty.size else None
+            ) if neg_mask.any() else (np.asarray([], dtype=float), None)
+        except Exception:
+            pos_curve = np.asarray([], dtype=float)
+            neg_curve = np.asarray([], dtype=float)
+    if pos_curve.size:
+        peaks_pos = _count_peaks_1d(pos_curve)
+    if neg_curve.size:
+        peaks_neg = _count_peaks_1d(neg_curve)
+    if pos_curve.size and neg_curve.size and pos_curve.size == neg_curve.size:
+        try:
+            phase_corr = float(np.corrcoef(pos_curve, neg_curve)[0, 1])
+        except Exception:
+            phase_corr = np.nan
 
     hist_block = {
-        # Curvas ANGPD tal cual vienen en result["angpd"]
         "phi_centers": phi_curve.tolist() if phi_curve.size else [],
         "angpd": ang_amp.tolist() if ang_amp.size else [],
         "n_angpd": nang_amp.tolist() if nang_amp.size else [],
         "angpd_qty": ang_qty.tolist() if ang_qty.size else [],
         "n_angpd_qty": nang_qty.tolist() if nang_qty.size else [],
-        # Histogramas H_amp/H_ph (bins configurables)
         "amp_hist_pos": amp_hist_pos.tolist(),
         "amp_edges_pos": amp_edges_pos.tolist(),
         "amp_hist_neg": amp_hist_neg.tolist(),
         "amp_edges_neg": amp_edges_neg.tolist(),
         "phase_hist_pos": phase_hist_pos.tolist(),
         "phase_hist_neg": phase_hist_neg.tolist(),
-        "ph_edges": ph_edges,
+        "ph_edges": ph_edges.tolist(),
     }
 
     metrics = {
