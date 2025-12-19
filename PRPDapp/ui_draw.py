@@ -137,29 +137,42 @@ def draw_gap_summary_split(ax, metrics: dict, gap_stats: dict | None, side: str,
         title_action = "ACCION GAP-TIME P50"
         title_interval = "TIEMPO ENTRE PULSOS P50"
 
-    def _wrap(line: str) -> list[str]:
+    import textwrap
+
+    def _wrap_label(label: str) -> list[str]:
+        if not label:
+            return [""]
+        parts = textwrap.wrap(label, width=20, break_long_words=False, break_on_hyphens=False)
+        if len(parts) <= 2:
+            return parts
+        return [parts[0], " ".join(parts[1:])]
+
+    def _wrap_badge(line: str) -> list[str]:
         if not line:
             return [""]
-        if len(line) <= 44:
-            return [line]
-        split_at = line[:44].rfind(" ")
-        if split_at > 20:
-            return [line[:split_at].strip(), line[split_at:].strip()]
-        return [line]
+        parts = textwrap.wrap(line, width=34, break_long_words=False, break_on_hyphens=False)
+        if len(parts) <= 2:
+            return parts
+        return [parts[0], " ".join(parts[1:])]
 
     header_y = draw_title(ax, "Resumen gap-time", y=0.93, register=register)
-    y = header_y - 0.06
+    y = header_y - 0.05
+    label_x = 0.06
+    badge_x = 0.46
     rows = [
         (title_action, clas_main, _default_action_lines),
         (title_interval, clas_main, lambda c: [_default_interval_text(c)]),
     ]
     for label, classification, builder in rows:
         color = (classification or {}).get("color", "#607d8b")
-        ax.text(0.05, y, label, fontsize=12, fontweight="bold", ha="left", va="center", color="#0f172a")
-        y -= 0.05
+        label_lines = _wrap_label(label)
+        for line in label_lines:
+            ax.text(label_x, y, line, fontsize=10.5, fontweight="bold", ha="left", va="center", color="#0f172a")
+            y -= 0.045
+        y -= 0.01
         for line in builder(classification):
-            for part in _wrap(line):
-                draw_tag(ax, part, 0.36, y, color=color, text_color="#ffffff")
-                y -= 0.06
-        ax.plot([0.05, 0.93], [y + 0.018, y + 0.018], color="#e3e6ec", linewidth=1.0)
-        y -= 0.02
+            for part in _wrap_badge(line):
+                draw_tag(ax, part, badge_x, y, color=color, text_color="#ffffff", size=10)
+                y -= 0.062
+        ax.plot([label_x, 0.94], [y + 0.02, y + 0.02], color="#e3e6ec", linewidth=1.0)
+        y -= 0.03

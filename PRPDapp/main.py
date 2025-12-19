@@ -136,6 +136,7 @@ class PRPDWindow(QMainWindow):
         self.ann = PRPDANN(class_names=self.pd_classes)
         self.ann_model = None
         self.ann_classes: list[str] = []
+        self._ann_model_path: str | None = None
         # Auto-cargar models/ann.pkl si existe
         try:
             if _load_ann_model is not None:
@@ -3551,33 +3552,148 @@ class PRPDWindow(QMainWindow):
             probs[key] = max(0.0, float(probs[key]) / total)
         return probs
 
+    def _build_ann_features_from_result(self, result: dict) -> dict[str, float]:
+        """Features simples para PRPDANN (robustas y sin romper si faltan datos)."""
+        res = result if isinstance(result, dict) else {}
+        aligned = res.get("aligned", {}) or {}
+        raw = res.get("raw", {}) or {}
+        ph = np.asarray(aligned.get("phase_deg", []), dtype=float)
+        amp = np.asarray(aligned.get("amplitude", []), dtype=float)
+        amp_abs = np.abs(amp)
+
+        raw_ph = raw.get("phase_deg", [])
+        try:
+            raw_n = int(len(raw_ph))
+        except Exception:
+            raw_n = 0
+        density = float(ph.size) / float(raw_n) if raw_n > 0 else 0.0
+
+        phase_std_deg = 180.0
+        if ph.size:
+            try:
+                th = np.deg2rad(np.mod(ph, 360.0))
+                c = float(np.mean(np.cos(th)))
+                s = float(np.mean(np.sin(th)))
+                R = float(np.hypot(c, s))
+                phase_std_deg = float(np.degrees(np.sqrt(max(0.0, -2.0 * np.log(max(R, 1e-12)))))) if R > 0 else 180.0
+            except Exception:
+                phase_std_deg = 180.0
+
+        return {
+            "amp_mean": float(np.mean(amp_abs)) if amp_abs.size else 0.0,
+            "amp_std": float(np.std(amp_abs)) if amp_abs.size else 0.0,
+            "amp_p95": float(np.percentile(amp_abs, 95)) if amp_abs.size else 0.0,
+            "density": float(density),
+            "phase_std_deg": float(phase_std_deg),
+            "phase_entropy": 0.0,
+            "rep_rate": 0.0,
+            "rep_entropy": 0.0,
+            "cluster_compactness": 0.0,
+            "cluster_separation": 0.0,
+            "lobes_count": 0.0,
+            "area_ratio": 0.0,
+        }
+
+    def _compute_ann_block(
+        self,
+        result: dict,
+        metrics: dict,
+        metrics_adv: dict,
+        summary: dict,
+        mask_label: str | None,
+    ) -> dict:
+        """Calcula/protege la salida ANN y la guarda en una estructura estable."""
+        features = self._build_ann_features_from_result(result)
+        probs_raw = None
+        source = "heuristic_simple"
+
+        if _ann_predict_proba is not None and getattr(self, "ann_model", None) is not None:
+            try:
+                probs_raw = _ann_predict_proba(self.ann_model, features)
+                source = "model"
+            except Exception:
+                probs_raw = None
+
+        if probs_raw is None and getattr(self, "ann", None) is not None and getattr(self.ann, "is_loaded", False):
+            try:
+                probs_raw = self.ann.predict_proba(features)
+                source = "model"
+            except Exception:
+                probs_raw = None
+
+        if probs_raw is None:
+            heur = metrics_adv.get("heuristic_probs") if isinstance(metrics_adv, dict) else None
+            if isinstance(heur, dict) and heur:
+                probs_raw = heur
+                source = "heuristic_kpi"
+            else:
+                probs_raw = self._infer_ann_probabilities(metrics, summary or {}, mask_label)
+                source = "heuristic_simple"
+
+        classes = list(getattr(self, "pd_classes", []) or ["cavidad", "superficial", "corona", "flotante", "suspendida", "ruido"])
+        canonical = {c: 0.0 for c in classes}
+
+        def _map_class(name: str) -> str | None:
+            n = (name or "").strip().lower()
+            if not n:
+                return None
+            if n.startswith("cavidad") or "void" in n or "interna" in n:
+                return "cavidad"
+            if n.startswith("super") or "track" in n:
+                return "superficial"
+            if n.startswith("corona"):
+                return "corona"
+            if n.startswith("flot"):
+                return "flotante"
+            if n.startswith("suspend"):
+                return "suspendida"
+            if n.startswith("ruido") or "noise" in n or "indeterm" in n:
+                return "ruido"
+            return None
+
+        if isinstance(probs_raw, dict):
+            for k, v in probs_raw.items():
+                cls = _map_class(str(k))
+                if cls and cls in canonical:
+                    try:
+                        canonical[cls] += float(v)
+                    except Exception:
+                        pass
+
+        total = sum(max(0.0, float(v)) for v in canonical.values())
+        if total <= 0:
+            if "ruido" in canonical:
+                canonical["ruido"] = 1.0
+            elif canonical:
+                first = next(iter(canonical))
+                canonical[first] = 1.0
+            total = 1.0
+        else:
+            canonical = {k: max(0.0, float(v)) / total for k, v in canonical.items()}
+
+        dominant = max(canonical, key=canonical.get) if canonical else "N/D"
+
+        return {
+            "source": source,
+            "model_path": getattr(self, "_ann_model_path", None),
+            "classes": list(canonical.keys()),
+            "probs": canonical,
+            "dominant": dominant,
+            "features": features,
+        }
+
     def _prepare_ann_bar_display(self, result: dict | None, summary: dict | None, metrics: dict | None = None, metrics_adv: dict | None = None):
         res = result if isinstance(result, dict) else {}
         metrics = metrics or {}
         metrics_adv = metrics_adv or res.get("metrics_advanced") or {}
         mask_label = (self.last_run_profile or {}).get("mask", self.cmb_masks.currentText())
         manual = self.manual_override if getattr(self, "manual_override", {}).get("enabled") else None
-
-        rule = res.get("rule_pd", {}) if isinstance(res, dict) else {}
-        rule_probs = {}
-        try:
-            rule_probs = {str(k).lower(): float(v) for k, v in (rule.get("class_probs", {}) or {}).items() if v is not None}
-        except Exception:
-            rule_probs = {}
-
-        heur_probs = {}
-        try:
-            heur_probs = metrics_adv.get("heuristic_probs") or {}
-        except Exception:
-            heur_probs = {}
-
-        if rule_probs:
-            raw_probs = dict(rule_probs)
-        elif heur_probs:
-            raw_probs = {str(k).lower(): float(v) for k, v in heur_probs.items() if v is not None}
+        ann_block = res.get("ann", {}) if isinstance(res, dict) else {}
+        if isinstance(ann_block, dict) and isinstance(ann_block.get("probs"), dict) and ann_block.get("probs"):
+            raw_probs_in = ann_block.get("probs") or {}
         else:
-            ann_probs = self._last_ann_probs or self._infer_ann_probabilities(metrics, summary or {}, mask_label)
-            raw_probs = {str(k).lower(): float(v) for k, v in (ann_probs or {}).items() if v is not None}
+            raw_probs_in = self._last_ann_probs or self._infer_ann_probabilities(metrics, summary or {}, mask_label)
+        raw_probs = {str(k).lower(): float(v) for k, v in (raw_probs_in or {}).items() if v is not None}
 
         # Forzar clase ANN desde override manual (con sesgo, no 100%)
         if manual and manual.get("ann_class"):
@@ -3635,10 +3751,7 @@ class PRPDWindow(QMainWindow):
             raw_probs = {k: 1.0 for k in raw_probs} or {"ruido_baja": 1.0}
             total_raw = float(sum(raw_probs.values()))
         raw_norm = {k: max(0.0, float(v) / total_raw) for k, v in raw_probs.items()}
-        try:
-            self._last_ann_probs = raw_norm
-        except Exception:
-            pass
+        hide_sr = bool(getattr(self, "chk_ann_hide_sr", None) and self.chk_ann_hide_sr.isChecked())
 
         bar_def = [
             ("corona", "Corona (+/-)", "#5a6c80", None),
@@ -3648,10 +3761,11 @@ class PRPDWindow(QMainWindow):
             ("suspendida", "Suspendida", "#26a69a", None),
             ("ruido_baja", "Ruido", "#9e9e9e", ["ruido"]),
         ]
+        bar_def_display = [row for row in bar_def if (not hide_sr) or (row[0] not in ("suspendida", "ruido_baja"))]
         labels: list[str] = []
         colors: list[str] = []
         values: list[float] = []
-        for key, label, color, aliases in bar_def:
+        for key, label, color, aliases in bar_def_display:
             labels.append(label)
             colors.append(color)
             candidates = [key]
@@ -3664,8 +3778,34 @@ class PRPDWindow(QMainWindow):
             values.append(max(0.0, float(val)))
 
         total_values = sum(values)
+        if total_values <= 0 and hide_sr:
+            # Si se ocultan clases y no queda nada visible, no ocultar para evitar render vacío.
+            bar_def_display = bar_def
+            labels = []
+            colors = []
+            values = []
+            for key, label, color, aliases in bar_def_display:
+                labels.append(label)
+                colors.append(color)
+                candidates = [key]
+                if aliases:
+                    if isinstance(aliases, (list, tuple)):
+                        candidates.extend([str(a).lower() for a in aliases])
+                    else:
+                        candidates.append(str(aliases).lower())
+                val = next((raw_norm.get(k, 0.0) for k in candidates if k in raw_norm), 0.0)
+                values.append(max(0.0, float(val)))
+            total_values = sum(values)
         if total_values > 0:
             values = [v / total_values for v in values]
+
+        # Guardar display (sin perder probs raw)
+        try:
+            if isinstance(res.get("ann"), dict):
+                res["ann"]["display_hidden"] = ["suspendida", "ruido"] if hide_sr else []
+                res["ann"]["probs_display"] = {labels[i]: float(values[i]) for i in range(len(labels))}
+        except Exception:
+            pass
         return labels, values, colors, raw_norm
 
     def _draw_ann_prediction_panel(self, result: dict, summary: dict, metrics: dict | None = None, metrics_adv: dict | None = None) -> None:
@@ -3674,7 +3814,12 @@ class PRPDWindow(QMainWindow):
         ax.set_facecolor("#f3f6fb")
         labels, values, colors, _ = self._prepare_ann_bar_display(result, summary, metrics, metrics_adv)
 
-        bars = ax.bar(labels, values, color=colors, edgecolor="#37474f", linewidth=1.0)
+        x = np.arange(len(labels), dtype=float)
+        labels_display = [str(lbl).replace(" / ", "\n") for lbl in labels]
+        bars = ax.bar(x, values, color=colors, edgecolor="#37474f", linewidth=1.0)
+        ax.set_xticks(x)
+        ax.set_xticklabels(labels_display, fontsize=9)
+        ax.tick_params(axis="x", pad=7)
         ax.set_ylim(0, 1.05)
         ax.set_ylabel("Probabilidad")
         ax.set_title("ANN Predicted PD Source", fontweight="bold")
@@ -3701,7 +3846,7 @@ class PRPDWindow(QMainWindow):
             text = "Prediccion dominante: N/D"
         ax.text(
             0.5,
-            -0.25,
+            -0.22,
             text,
             transform=ax.transAxes,
             ha="center",
@@ -3775,8 +3920,19 @@ class PRPDWindow(QMainWindow):
         if classification:
             label = classification.get("level_name", "Gap")
             color = classification.get("color", "#546e7a")
-            # Ubicar dentro del panel sin recortar el texto
-            self._draw_status_tag(ax, label, 0.72, 0.08, color=color)
+            # Etiqueta en el borde derecho para evitar recortes en pantallas angostas
+            ax.text(
+                0.98,
+                0.08,
+                label,
+                transform=ax.transAxes,
+                ha="right",
+                va="center",
+                fontsize=11,
+                color="#ffffff",
+                fontweight="bold",
+                bbox=dict(boxstyle="round,pad=0.25", facecolor=color, edgecolor="none"),
+            )
         handles, labels = ax.get_legend_handles_labels()
         legend_entries = []
         legend_labels = []
@@ -3943,6 +4099,18 @@ class PRPDWindow(QMainWindow):
             return ("Sin datos alineados para analizar conclusiones.", {})
 
         summary = logic_classify_pd(metrics)
+
+        # ANN (modelo si existe; fallback heurístico). Se guarda en result para trazabilidad/exports.
+        try:
+            mask_label = (self.last_run_profile or {}).get("mask", self.cmb_masks.currentText())
+        except Exception:
+            mask_label = None
+        try:
+            ann_block = self._compute_ann_block(result, metrics, metrics_adv, summary, mask_label)
+            if isinstance(result, dict):
+                result["ann"] = ann_block
+        except Exception:
+            ann_block = {}
         try:
             visual_extended = bool(getattr(self, "chk_visual_extended", None) and self.chk_visual_extended.isChecked())
         except Exception:
@@ -3959,6 +4127,7 @@ class PRPDWindow(QMainWindow):
             "filter": self._get_filter_label(),
             "gap": gap_stats or {},
             "metrics_advanced": metrics_adv if isinstance(locals().get("metrics_adv"), dict) else result.get("metrics_advanced", {}),
+            "ann": ann_block,
             "conclusion_block": conclusion_block,
         }
         if isinstance(result, dict):
@@ -4045,7 +4214,11 @@ class PRPDWindow(QMainWindow):
         metrics = payload.get("metrics", {}) if isinstance(payload, dict) else {}
         manual = self.manual_override if getattr(self, "manual_override", {}).get("enabled") else None
         mask_label = (self.last_run_profile or {}).get("mask", self.cmb_masks.currentText())
-        self._last_ann_probs = self._infer_ann_probabilities(metrics, summary, mask_label)
+        ann_block = payload.get("ann", {}) if isinstance(payload, dict) else {}
+        ann_probs = ann_block.get("probs") if isinstance(ann_block, dict) else None
+        if not isinstance(ann_probs, dict) or not ann_probs:
+            ann_probs = self._infer_ann_probabilities(metrics, summary, mask_label)
+        self._last_ann_probs = ann_probs or {}
         self._append_ann_history(self._last_ann_probs)
         self._load_ann_history(stem_for_history)
 
@@ -4352,6 +4525,10 @@ class PRPDWindow(QMainWindow):
             except Exception:
                 ok = False
         if ok:
+            try:
+                self._ann_model_path = str(path)
+            except Exception:
+                self._ann_model_path = None
             QMessageBox.information(self, 'ANN', f'Modelo cargado.\n{path}')
             if self.last_result:
                 self.render_result(self.last_result)
