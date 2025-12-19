@@ -24,4 +24,7 @@ def connect_events(wnd) -> None:
     wnd.cmb_plot.currentTextChanged.connect(wnd._on_view_changed)
     wnd.cmb_phase.currentIndexChanged.connect(wnd._on_phase_changed)
     wnd.cmb_hist_bins.currentTextChanged.connect(wnd._on_hist_bins_changed)
-
+    if hasattr(wnd, "cmb_asset"):
+        wnd.cmb_asset.currentTextChanged.connect(wnd._on_asset_changed)
+    if hasattr(wnd, "chk_ann_hide_sr"):
+        wnd.chk_ann_hide_sr.toggled.connect(wnd._on_ann_display_config_changed)

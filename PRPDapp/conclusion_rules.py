@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import Any, Dict, Optional
 
+from PRPDapp.severity_oil import compute_severity_oil
+
 # Matriz de decision centrada en transformadores sumergidos (aceite mineral o vegetal)
 REGLAS_CONCLUSION: Dict[str, Dict[str, str]] = {
     "Descarga Superficial": {
@@ -112,6 +114,13 @@ def build_conclusion_block(
     kpis = res.get("kpis", {}) if isinstance(res, dict) else {}
     fa_kpis = res.get("fa_kpis", {}) if isinstance(res, dict) else {}
     metrics_adv = res.get("metrics_advanced", {}) if isinstance(res, dict) else {}
+    metrics = res.get("metrics", {}) if isinstance(res, dict) else {}
+    gap_stats = res.get("gap_stats", {}) if isinstance(res, dict) else {}
+    ann_block = res.get("ann") if isinstance(res, dict) else None
+
+    asset_type = res.get("asset_type") or "oil_mineral"
+    if not isinstance(asset_type, str) or not asset_type.strip():
+        asset_type = "oil_mineral"
 
     final_raw = analysis.get("final_class") or res.get("final_class") or rule_pd.get("class_label") or summary.get("pd_type") or res.get("predicted")
     dominant = _normalize_final_class(final_raw) or _normalize_final_class(rule_pd.get("class_id")) or _normalize_final_class(summary.get("pd_type"))
@@ -120,17 +129,30 @@ def build_conclusion_block(
 
     reglas = REGLAS_CONCLUSION.get(dominant) if isinstance(dominant, str) else None
 
-    lifetime_score = _pick_first(res, ["lifetime_score"]) or rule_pd.get("lifetime_score") or summary.get("life_score")
-    risk_level = (reglas or {}).get("severity") or rule_pd.get("risk_level") or summary.get("risk") or "No definido"
-    rule_stage = (reglas or {}).get("stage") or rule_pd.get("stage") or summary.get("stage") or "No definida"
-    lifetime_band = (reglas or {}).get("lifetime_band") or rule_pd.get("lifetime_band") or _band_from_score(lifetime_score) or "No definida"
-    actions = (reglas or {}).get("actions") or rule_pd.get("actions") or summary.get("actions")
+    # Severidad unificada (aceite): usa KPIs + gap + ANN (si existe)
+    severity_block = compute_severity_oil(
+        {
+            "metrics": metrics,
+            "metrics_advanced": metrics_adv,
+            "fa_kpis": fa_kpis,
+            "kpis": kpis,
+        },
+        gap_stats if isinstance(gap_stats, dict) else {},
+        ann_block,
+        ruleset={"asset_type": asset_type},
+    )
+
+    lifetime_score = _pick_first(res, ["lifetime_score"]) or severity_block.get("lifetime_score") or rule_pd.get("lifetime_score") or summary.get("life_score")
+    risk_level = severity_block.get("risk_level") or rule_pd.get("risk_level") or summary.get("risk") or (reglas or {}).get("severity") or "No definido"
+    rule_stage = severity_block.get("stage") or rule_pd.get("stage") or summary.get("stage") or (reglas or {}).get("stage") or "No definida"
+    lifetime_band = severity_block.get("lifetime_band") or rule_pd.get("lifetime_band") or _band_from_score(lifetime_score) or (reglas or {}).get("lifetime_band") or "No definida"
+    actions = severity_block.get("actions") or rule_pd.get("actions") or summary.get("actions") or (reglas or {}).get("actions")
     if isinstance(actions, list):
         actions = " ".join(str(a) for a in actions if a)
     if not actions:
         actions = "No definido"
 
-    location_hint = res.get("location_hint") or rule_pd.get("location_hint") or summary.get("location") or "No disponible"
+    location_hint = severity_block.get("location_hint") or res.get("location_hint") or rule_pd.get("location_hint") or summary.get("location") or "No disponible"
     evolution_stage = res.get("cluster_stage") or res.get("prpd_stage") or summary.get("stage") or rule_stage
 
     fa_value = None
@@ -140,17 +162,23 @@ def build_conclusion_block(
         fa_value = _pick_first(fa_kpis, ["ang_amp_concentration_index", "phase_width_deg", "p95_amplitude"])
 
     conclusion = {
-        "asset_type": "oil_immersed",
-        "dominant_discharge": dominant,
+        "asset_type": asset_type,
+        "dominant_discharge": severity_block.get("class_label") or dominant,
         "risk_level": risk_level,
         "rule_pd_stage": rule_stage,
         "lifetime_score_band": lifetime_band,
-        "lifetime_score_text": interpreta_lifetime_score(lifetime_score),
+        "lifetime_score_text": severity_block.get("lifetime_text") or interpreta_lifetime_score(lifetime_score),
         "actions": actions,
         "location_hint": location_hint or "No disponible",
         "fa_value": fa_value,
         "evolution_stage": evolution_stage,
         "lifetime_score": lifetime_score,
+        # Campos estables para UI/export
+        "severity_index": severity_block.get("severity_index"),
+        "severity_level": severity_block.get("severity_level"),
+        "risk_level_kpi": severity_block.get("risk_level"),
+        "stage_code": severity_block.get("stage_code"),
+        "severity_notes": severity_block.get("notes"),
     }
 
     if visual_extended:

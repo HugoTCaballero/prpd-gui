@@ -61,16 +61,18 @@ LOCATION_HINT = {
 
 def build_rule_features(result: dict) -> dict:
     metrics = result.get("metrics", {}) if isinstance(result, dict) else {}
+    metrics_adv = result.get("metrics_advanced", {}) if isinstance(result, dict) else {}
     fa = result.get("fa_kpis", {}) if isinstance(result, dict) else {}
     # Fuente preferida: kpis consolidados si existen
     kpis_consolidated = result.get("kpis", {}) if isinstance(result, dict) else {}
     kpis = kpis_consolidated if kpis_consolidated else result.get("kpi", {}) if isinstance(result, dict) else {}
     gap = result.get("gap_stats", {}) or result.get("gap_summary", {}) or {}
-    hist = kpis.get("hist", {}) if isinstance(kpis, dict) else {}
-    skew = metrics.get("skewness", {})
-    kurt = metrics.get("kurtosis", {})
-    num_peaks = metrics.get("num_peaks", {}) if isinstance(metrics, dict) else {}
-    med_p95 = metrics.get("phase_medians_p95", {}) if isinstance(metrics, dict) else {}
+    skew = (metrics_adv.get("skewness") or metrics.get("skewness") or {}) if isinstance(metrics_adv, dict) else (metrics.get("skewness") or {})
+    kurt = (metrics_adv.get("kurtosis") or metrics.get("kurtosis") or {}) if isinstance(metrics_adv, dict) else (metrics.get("kurtosis") or {})
+    num_peaks = (metrics_adv.get("num_peaks") or {}) if isinstance(metrics_adv, dict) else {}
+    med_p95 = (metrics_adv.get("phase_medians_p95") or {}) if isinstance(metrics_adv, dict) else {}
+    phase_corr = metrics_adv.get("phase_corr") if isinstance(metrics_adv, dict) else None
+    pulses_ratio = metrics_adv.get("pulses_ratio") if isinstance(metrics_adv, dict) else None
 
     features = {
         # FA-KPIs
@@ -88,15 +90,24 @@ def build_rule_features(result: dict) -> dict:
         "kurt_neg": kurt.get("neg_kurt") if isinstance(kurt, dict) else None,
         "num_peaks_pos": num_peaks.get("pos") if isinstance(num_peaks, dict) else metrics.get("n_peaks_pos"),
         "num_peaks_neg": num_peaks.get("neg") if isinstance(num_peaks, dict) else metrics.get("n_peaks_neg"),
-        "phase_corr": metrics.get("phase_corr"),
+        "phase_corr": phase_corr if phase_corr is not None else metrics.get("phase_corr"),
         "median_pos_phase": med_p95.get("median_pos_phase"),
         "median_neg_phase": med_p95.get("median_neg_phase"),
         "p95_global_amp": med_p95.get("p95_amp"),
 
         # Severidad base
-        "n_angpd_angpd_ratio": kpis.get("n_ang_ratio"),
-        "total_pulses": metrics.get("total_count") or fa.get("total_pulses") or kpis.get("total_pulses"),
-        "pulses_ratio": metrics.get("pulses_ratio"),
+        "n_angpd_angpd_ratio": (
+            kpis.get("n_angpd_angpd_ratio")
+            or kpis.get("n_ang_ratio")
+            or metrics.get("n_ang_ratio")
+        ),
+        "total_pulses": (
+            metrics.get("total_count")
+            or fa.get("total_pulses")
+            or kpis.get("fa_n_pulses_total")
+            or kpis.get("total_pulses")
+        ),
+        "pulses_ratio": pulses_ratio if pulses_ratio is not None else metrics.get("pulses_ratio"),
 
         # Gap-time (según nombres disponibles)
         "gap_p50_ms": gap.get("p50_ms") or gap.get("P50_ms"),
@@ -216,7 +227,9 @@ def _compute_severity_index(features: dict) -> float:
         s_gap = max(0.0, min(1.0, (15.0 - gap_p5) / 15.0))
     s_ratio = max(0.0, min(1.0, ratio / 30.0))
     s_pulses = max(0.0, min(1.0, pulses / 5000.0))
-    s_p95 = max(0.0, min(1.0, p95))
+    # p95 suele venir en escala 0..100 (amplitud); normalizar a 0..1 si aplica
+    p95_norm = (p95 / 100.0) if p95 > 1.0 else p95
+    s_p95 = max(0.0, min(1.0, p95_norm))
     w_gap, w_ratio, w_pulses, w_p95 = 0.4, 0.3, 0.2, 0.1
     s = (w_gap * s_gap + w_ratio * s_ratio + w_pulses * s_pulses + w_p95 * s_p95) / (w_gap + w_ratio + w_pulses + w_p95)
     return float(10.0 * s)

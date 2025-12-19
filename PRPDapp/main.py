@@ -658,6 +658,37 @@ class PRPDWindow(QMainWindow):
         lbl.setText(text)
         lbl.setVisible(bool(text))
 
+    def _get_asset_type(self) -> str:
+        """Configuración del activo (solo aceite mineral/vegetal por ahora)."""
+        try:
+            txt = self.cmb_asset.currentText().strip().lower()
+        except Exception:
+            txt = ""
+        if "vegetal" in txt:
+            return "oil_vegetal"
+        return "oil_mineral"
+
+    def _on_asset_changed(self, *_):
+        """Refresca severidad/conclusiones al cambiar tipo de aceite."""
+        asset_type = self._get_asset_type()
+        if self.last_result and isinstance(self.last_result, dict):
+            try:
+                self.last_result["asset_type"] = asset_type
+            except Exception:
+                pass
+            try:
+                self.render_result(self.last_result)
+            except Exception:
+                pass
+
+    def _on_ann_display_config_changed(self, *_):
+        """Refresca la vista ANN al cambiar opciones de display (sin reprocesar)."""
+        if self.last_result:
+            try:
+                self.render_result(self.last_result)
+            except Exception:
+                pass
+
     def _on_centers_combined_toggle(self, *_):
         """Refresca la vista combinada si está activa al cambiar el toggle de centros S3."""
         try:
@@ -1428,6 +1459,7 @@ class PRPDWindow(QMainWindow):
             self.mask_interval_2.text().strip() if hasattr(self, "mask_interval_2") else "",
         )
         return {
+            "asset_type": self._get_asset_type(),
             "phase": phase,
             "filter": filt,
             "mask": mask,
@@ -2177,6 +2209,10 @@ class PRPDWindow(QMainWindow):
                 phase_mask=mask_ranges,
                 pixel_deciles_keep=None,
             )
+            try:
+                result["asset_type"] = profile.get("asset_type") or self._get_asset_type()
+            except Exception:
+                pass
             if self.chk_gap.isChecked():
                 gx = getattr(self, "_gap_xml_path", None)
                 if gx:

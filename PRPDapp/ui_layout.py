@@ -64,6 +64,12 @@ def build_top_bar(wnd):
     wnd.cmb_filter.addItems(["S1 Weak", "S2 Strong"])
     wnd.cmb_filter.setCurrentIndex(0)
 
+    # Tipo de aceite (solo sumergidos en aceite por ahora)
+    wnd.cmb_asset = QComboBox()
+    wnd.cmb_asset.addItems(["Aceite mineral", "Aceite vegetal"])
+    wnd.cmb_asset.setCurrentIndex(0)
+    wnd.cmb_asset.setToolTip("Configuración de activo: transformador sumergido en aceite (mineral o vegetal).")
+
     wnd.cmb_masks = QComboBox()
     wnd.cmb_masks.addItems(["Ninguna", "Corona +", "Corona -", "Superficial", "Void", "Manual"])
     wnd.cmb_masks.setCurrentIndex(0)
@@ -121,6 +127,7 @@ def build_top_bar(wnd):
 
     row2.addWidget(QLabel("Fase:")); row2.addWidget(wnd.cmb_phase); row2.addWidget(wnd.btn_phase_manual)
     row2.addWidget(QLabel("Filtro:")); row2.addWidget(wnd.cmb_filter)
+    row2.addWidget(QLabel("Aceite:")); row2.addWidget(wnd.cmb_asset)
     row2.addWidget(QLabel("Máscara:")); row2.addWidget(wnd.cmb_masks)
     for w in wnd._mask_manual_widgets:
         row2.addWidget(w)
