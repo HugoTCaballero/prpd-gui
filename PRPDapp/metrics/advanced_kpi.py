@@ -20,24 +20,24 @@ def _weighted_percentile(data: np.ndarray, weights: np.ndarray, percentile: floa
     return data[idx]
 
 
-def _weighted_moments(data: np.ndarray, weights: np.ndarray) -> tuple[float, float, float]:
+def _weighted_moments(data: np.ndarray, weights: np.ndarray) -> tuple[float, float, float, float]:
     data = np.asarray(data, dtype=float)
     weights = np.asarray(weights, dtype=float)
     if data.size == 0 or weights.size != data.size:
-        return (np.nan, np.nan, np.nan)
+        return (np.nan, np.nan, np.nan, np.nan)
     w_sum = np.sum(weights)
     if w_sum == 0:
-        return (np.nan, np.nan, np.nan)
+        return (np.nan, np.nan, np.nan, np.nan)
     mean = np.sum(weights * data) / w_sum
     diff = data - mean
     m2 = np.sum(weights * diff**2) / w_sum
     m3 = np.sum(weights * diff**3) / w_sum
     m4 = np.sum(weights * diff**4) / w_sum
-    return mean, m3, m4
+    return mean, m2, m3, m4
 
 
 def _weighted_skew_kurt(data: np.ndarray, weights: np.ndarray) -> tuple[float, float]:
-    mean, m3, m4 = _weighted_moments(data, weights)
+    mean, m2, m3, m4 = _weighted_moments(data, weights)
     data = np.asarray(data, dtype=float)
     weights = np.asarray(weights, dtype=float)
     if data.size == 0 or weights.size != data.size:
@@ -45,8 +45,6 @@ def _weighted_skew_kurt(data: np.ndarray, weights: np.ndarray) -> tuple[float, f
     w_sum = np.sum(weights)
     if w_sum == 0:
         return (np.nan, np.nan)
-    diff = data - mean
-    m2 = np.sum(weights * diff**2) / w_sum
     if m2 <= 0:
         return (np.nan, np.nan)
     skew = m3 / (m2 ** 1.5)
@@ -118,16 +116,39 @@ def compute_advanced_metrics(result: dict, bins_amp: int = 32, bins_phase: int =
     pos_mask = (phi_mod < 180.0) if phi_mod.size else np.zeros(0, dtype=bool)
     neg_mask = ~pos_mask if phi_mod.size else np.zeros(0, dtype=bool)
 
-    # Skew/Kurt/medianas con pesos qty
-    pos_skew, pos_kurt = _weighted_skew_kurt(ph[pos_mask], qty[pos_mask]) if pos_mask.any() else (np.nan, np.nan)
-    neg_skew, neg_kurt = _weighted_skew_kurt(ph[neg_mask], qty[neg_mask]) if neg_mask.any() else (np.nan, np.nan)
+    nd_reasons: dict[str, str] = {}
+    n_total = int(phi_mod.size) if phi_mod.size else 0
+    n_pos = int(pos_mask.sum()) if pos_mask.size else 0
+    n_neg = int(neg_mask.sum()) if neg_mask.size else 0
 
-    median_pos = _weighted_percentile(ph[pos_mask], qty[pos_mask], 50) if pos_mask.any() else np.nan
-    median_neg = _weighted_percentile(ph[neg_mask], qty[neg_mask], 50) if neg_mask.any() else np.nan
+    # Skew/Kurt/medianas con pesos qty
+    min_points_moments = 3
+    pos_skew = pos_kurt = np.nan
+    neg_skew = neg_kurt = np.nan
+    if n_pos >= min_points_moments:
+        pos_skew, pos_kurt = _weighted_skew_kurt(ph[pos_mask], qty[pos_mask])
+        if not np.isfinite(pos_skew) or not np.isfinite(pos_kurt):
+            nd_reasons["skewness.pos_skew"] = "Skew/Kurt (semiciclo +): varianza cero o pesos nulos."
+            nd_reasons["kurtosis.pos_kurt"] = nd_reasons["skewness.pos_skew"]
+    else:
+        nd_reasons["skewness.pos_skew"] = f"Skew/Kurt (semiciclo +): insuficientes pulsos (n={n_pos})."
+        nd_reasons["kurtosis.pos_kurt"] = nd_reasons["skewness.pos_skew"]
+
+    if n_neg >= min_points_moments:
+        neg_skew, neg_kurt = _weighted_skew_kurt(ph[neg_mask], qty[neg_mask])
+        if not np.isfinite(neg_skew) or not np.isfinite(neg_kurt):
+            nd_reasons["skewness.neg_skew"] = "Skew/Kurt (semiciclo -): varianza cero o pesos nulos."
+            nd_reasons["kurtosis.neg_kurt"] = nd_reasons["skewness.neg_skew"]
+    else:
+        nd_reasons["skewness.neg_skew"] = f"Skew/Kurt (semiciclo -): insuficientes pulsos (n={n_neg})."
+        nd_reasons["kurtosis.neg_kurt"] = nd_reasons["skewness.neg_skew"]
+
+    median_pos = _weighted_percentile(ph[pos_mask], qty[pos_mask], 50) if n_pos else np.nan
+    median_neg = _weighted_percentile(ph[neg_mask], qty[neg_mask], 50) if n_neg else np.nan
     p95_amp = float(np.percentile(amp, 95)) if amp.size else np.nan
 
-    qty_pos = float(np.sum(qty[pos_mask])) if pos_mask.any() else 0.0
-    qty_neg = float(np.sum(qty[neg_mask])) if neg_mask.any() else 0.0
+    qty_pos = float(np.sum(qty[pos_mask])) if n_pos else 0.0
+    qty_neg = float(np.sum(qty[neg_mask])) if n_neg else 0.0
     pulses_ratio = qty_pos / qty_neg if qty_neg else np.nan
 
     # Histogramas por semiciclo con pesos (para overlay y KPIs faltantes)
@@ -185,6 +206,10 @@ def compute_advanced_metrics(result: dict, bins_amp: int = 32, bins_phase: int =
         peaks_neg = _count_peaks_1d(neg_curve)
     if pos_curve.size and neg_curve.size and pos_curve.size == neg_curve.size:
         phase_corr = _safe_corr(pos_curve, neg_curve)
+        if not np.isfinite(phase_corr):
+            nd_reasons.setdefault("phase_corr", "Correlación de fases: datos insuficientes o varianza cero.")
+    else:
+        nd_reasons.setdefault("phase_corr", "Correlación de fases: curvas pos/neg no disponibles.")
 
     hist_block = {
         "phi_centers": phi_curve.tolist() if phi_curve.size else [],
@@ -213,6 +238,8 @@ def compute_advanced_metrics(result: dict, bins_amp: int = 32, bins_phase: int =
             "p95_amp": p95_amp,
         },
         "pulses_ratio": pulses_ratio,
+        "counts": {"total": n_total, "pos": n_pos, "neg": n_neg},
+        "nd_reasons": nd_reasons,
     }
 
     scores = {"cavidad": 0.0, "superficial": 0.0, "corona": 0.0, "flotante": 0.0, "ruido": 0.0, "suspendida": 0.0}

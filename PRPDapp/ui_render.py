@@ -118,6 +118,21 @@ def render_conclusions(wnd, result: dict, payload: dict | None = None) -> None:
     metrics_adv = payload.get("metrics_advanced", {}) if isinstance(payload, dict) else {}
     if not metrics_adv:
         metrics_adv = result.get("metrics_advanced", {})
+    try:
+        if not metrics_adv:
+            wnd._set_warning("N/D: métricas avanzadas no disponibles (faltan datos o no se calcularon en este flujo).")
+            nd_reasons = {}
+            nd_msgs = []
+        else:
+            nd_reasons = metrics_adv.get("nd_reasons", {}) if isinstance(metrics_adv, dict) else {}
+            nd_msgs = [v for k, v in nd_reasons.items() if isinstance(v, str) and (k.startswith("skewness") or k.startswith("kurtosis"))]
+        if nd_msgs:
+            wnd._set_warning(f"N/D: {nd_msgs[0]}")
+            print("[INFO] Conclusiones:", nd_msgs[0])
+        elif metrics_adv:
+            wnd._set_warning("")
+    except Exception:
+        pass
     kpis = result.get("kpis", {}) if isinstance(result, dict) else {}
     fa_kpis = result.get("fa_kpis", {}) if isinstance(result, dict) else {}
     manual = wnd.manual_override if getattr(wnd, "manual_override", {}).get("enabled") else None
@@ -274,6 +289,20 @@ def render_conclusions(wnd, result: dict, payload: dict | None = None) -> None:
          _fmt_value(metrics.get("n_peaks"), decimals=0),
          _fmt_value(metrics.get("n_peaks_pos"), decimals=0),
          _fmt_value(metrics.get("n_peaks_neg"), decimals=0),
+         None,
+         False,
+         0.26),
+        ("Skewness (fase)",
+         "-",
+         _fmt_value(skew_pos, decimals=2),
+         _fmt_value(skew_neg, decimals=2),
+         None,
+         False,
+         0.26),
+        ("Kurtosis (fase)",
+         "-",
+         _fmt_value(kurt_pos, decimals=2),
+         _fmt_value(kurt_neg, decimals=2),
          None,
          False,
          0.26),
@@ -529,8 +558,10 @@ def render_conclusions(wnd, result: dict, payload: dict | None = None) -> None:
     dom_pd = conclusion_block.get("dominant_discharge") or rule_pd.get("class_label") or rule_pd.get("dominant_pd") or summary.get("pd_type") or "N/D"
     location = conclusion_block.get("location_hint") or rule_pd.get("location_hint", "N/D")
     stage = conclusion_block.get("rule_pd_stage") or rule_pd.get("stage", "N/D")
-    sev_level = rule_pd.get("severity_level") or summary.get("risk") or "N/D"
-    sev_idx = rule_pd.get("severity_index")
+    sev_level = conclusion_block.get("severity_level") or rule_pd.get("severity_level") or summary.get("risk") or "N/D"
+    sev_idx = conclusion_block.get("severity_index")
+    if sev_idx is None:
+        sev_idx = rule_pd.get("severity_index")
     risk_label = conclusion_block.get("risk_level") or rule_pd.get("risk_level", summary.get("risk", "N/D"))
     lifetime_score = conclusion_block.get("lifetime_score") or rule_pd.get("lifetime_score")
     lifetime_band = conclusion_block.get("lifetime_score_band") or rule_pd.get("lifetime_band")
