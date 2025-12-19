@@ -2950,16 +2950,9 @@ class PRPDWindow(QMainWindow):
         table_ax.text(0.02, 0.10, "Etiqueta basada en p50 (tabla _gap_condition).", fontsize=9, style="italic", ha="left", va="top")
 
     def _render_kpi_avanzados(self, r: dict, payload: dict | None = None) -> None:
-        """Vista sencilla para KPIs avanzados / histogramas."""
+        """Vista 'KPI avanzados': tarjetas 2x2 compactas y legibles."""
         self._set_conclusion_mode(False)
         self._restore_standard_axes()
-        for ax in (self.ax_raw, self.ax_filtered, self.ax_probs, self.ax_text):
-            ax.clear()
-            ax.set_facecolor("#fafafa")
-            try:
-                ax.set_xticks([]); ax.set_yticks([])
-            except Exception:
-                pass
 
         metrics = (payload or {}).get("metrics") if isinstance(payload, dict) else None
         if metrics is None:
@@ -2973,111 +2966,219 @@ class PRPDWindow(QMainWindow):
         ang_kpi = r.get("ang_proj_kpis", {}) if isinstance(r, dict) else {}
         fa_kpi = r.get("fa_kpis", {}) if isinstance(r, dict) else {}
 
-        def _fmt(val, decimals=2):
+        def _fmt(val, decimals=2, suffix: str = ""):
             try:
                 if val is None:
                     return "N/D"
                 if isinstance(val, str):
-                    return val
-                return f"{float(val):.{decimals}f}"
+                    txt = val.strip()
+                    return txt if txt else "N/D"
+                if isinstance(val, (int, np.integer)):
+                    return f"{int(val):,}{suffix}"
+                return f"{float(val):.{decimals}f}{suffix}"
             except Exception:
                 return "N/D"
 
-        def _add_block(ax, body_lines: list[str], *, face="#f6f8fb"):
+        def _setup_card_axis(ax, *, face: str):
             ax.clear()
+            ax.set_visible(True)
             ax.set_axis_off()
             ax.set_facecolor(face)
-            ax.text(
-                0.02,
-                0.98,
-                "\n".join(body_lines),
-                va="top",
-                ha="left",
-                fontsize=10,
-                fontfamily="monospace",
-                bbox=dict(facecolor="white", alpha=0.9, boxstyle="round,pad=0.4", edgecolor="#c7d0e0"),
-            )
+            ax.set_xlim(0, 1)
+            ax.set_ylim(0, 1)
 
-        # Bloque histograma (texto + opcional miniplot)
-        ax_top = self.ax_raw
-        ax_top.set_visible(True)
-        hist_lines = ["KPI avanzados", "", "Histograma (N=16)", "-----------------"]
-        if hist_kpi:
-            for k, v in hist_kpi.items():
-                hist_lines.append(f"• {k:<22}: {_fmt(v, 3)}")
+        def _draw_card(ax, title: str, *, subtitle: str | None = None, accent: str = "#e8eefc") -> float:
+            card = FancyBboxPatch(
+                (0.03, 0.06),
+                0.94,
+                0.88,
+                boxstyle="round,pad=0.02",
+                linewidth=1.0,
+                facecolor="#ffffff",
+                edgecolor="#d7dce5",
+                transform=ax.transAxes,
+            )
+            ax.add_patch(card)
+            ax.text(
+                0.06,
+                0.92,
+                title.upper(),
+                fontsize=11,
+                fontweight="bold",
+                ha="left",
+                va="center",
+                color="#0f172a",
+                transform=ax.transAxes,
+                bbox=dict(boxstyle="round,pad=0.22", facecolor=accent, edgecolor="none"),
+            )
+            ax.plot([0.06, 0.96], [0.885, 0.885], color="#e1e5eb", linewidth=1.2, transform=ax.transAxes)
+            y = 0.84
+            if subtitle:
+                ax.text(0.06, y, subtitle, fontsize=9.5, fontweight="bold", ha="left", va="center", color="#5f6c7b", transform=ax.transAxes)
+                y -= 0.05
+            return y
+
+        def _draw_kv_table(ax, rows: list[tuple[str, str]], *, y_top: float, y_bottom: float = 0.12, cols: int = 2) -> None:
+            import math
+
+            rows = [(str(k), str(v)) for k, v in (rows or []) if k]
+            if not rows:
+                ax.text(0.06, y_top, "Sin datos", fontsize=10, ha="left", va="top", color="#5f6c7b", transform=ax.transAxes)
+                return
+            cols = 2 if cols >= 2 else 1
+            per_col = int(math.ceil(len(rows) / cols))
+            step = (y_top - y_bottom) / max(per_col - 1, 1)
+            left = (0.06, 0.48)
+            right = (0.54, 0.94)
+            for idx, (label, value) in enumerate(rows):
+                col = idx // per_col
+                row = idx % per_col
+                x_label, x_val = left if col == 0 else right
+                y = y_top - row * step
+                ax.text(x_label, y, label, fontsize=9.8, ha="left", va="center", color="#111827", transform=ax.transAxes)
+                ax.text(x_val, y, value, fontsize=9.8, fontweight="bold", ha="right", va="center", color="#0f172a", family="monospace", transform=ax.transAxes)
+
+        # 2x2: (histograma + mini-plot) / (métricas avanzadas) / (ANGPD 2.0) / (FA profile)
+        ax_hist = self.ax_raw
+        ax_adv = self.ax_filtered
+        ax_ang = self.ax_probs
+        ax_fa = self.ax_text
+
+        _setup_card_axis(ax_hist, face="#f3f6fb")
+        _setup_card_axis(ax_adv, face="#f3f6fb")
+        _setup_card_axis(ax_ang, face="#f9f6ff")
+        _setup_card_axis(ax_fa, face="#f6fffa")
+
+        # Histograma: KPIs + mini-gráfica (si está disponible)
+        hist_y = _draw_card(ax_hist, "KPI avanzados", subtitle="Histograma (N=16)", accent="#e8eefc")
+        hist_name_map = {
+            "hist_amp_active_bins_pos": "Bins amp (+) activos",
+            "hist_amp_active_bins_neg": "Bins amp (-) activos",
+            "hist_ph_active_bins_pos": "Bins fase (+) activos",
+            "hist_ph_active_bins_neg": "Bins fase (-) activos",
+            "hist_amp_peak_bin_pos": "Bin pico amp (+)",
+            "hist_amp_peak_bin_neg": "Bin pico amp (-)",
+            "hist_ph_peak_bin_pos": "Bin pico fase (+)",
+            "hist_ph_peak_bin_neg": "Bin pico fase (-)",
+            "hist_amp_pos_neg_corr": "Corr amp +/-",
+            "hist_ph_pos_neg_corr": "Corr fase +/-",
+        }
+        hist_order = list(hist_name_map.keys())
+        hist_rows = []
+        if isinstance(hist_kpi, dict) and hist_kpi:
+            for key in hist_order:
+                if key in hist_kpi:
+                    hist_rows.append((hist_name_map.get(key, key), _fmt(hist_kpi.get(key), 3)))
+            if not hist_rows:
+                for k, v in list(hist_kpi.items())[:12]:
+                    hist_rows.append((str(k), _fmt(v, 3)))
         else:
-            hist_lines.append("No se encontraron KPIs de histograma.")
+            hist_rows = [("KPIs histograma", "N/D")]
+
+        # Mini plot (amplitud hist) en inset para aprovechar el espacio
         try:
             hist_adv = adv.get("hist", {}) if isinstance(adv, dict) else {}
             amp_pos = np.asarray(hist_adv.get("amp_hist_pos", []), dtype=float)
             amp_neg = np.asarray(hist_adv.get("amp_hist_neg", []), dtype=float)
             edges_pos = np.asarray(hist_adv.get("amp_edges_pos", []), dtype=float)
-            if amp_pos.size and edges_pos.size == amp_pos.size + 1:
+            if edges_pos.size and ((amp_pos.size and edges_pos.size == amp_pos.size + 1) or (amp_neg.size and edges_pos.size == amp_neg.size + 1)):
+                inset = ax_hist.inset_axes([0.54, 0.58, 0.40, 0.24])
+                inset.set_facecolor("#ffffff")
+                inset.grid(True, alpha=0.18, linestyle="--")
                 centers = (edges_pos[:-1] + edges_pos[1:]) / 2.0
-                norm = np.max(amp_pos) or 1.0
-                ax_top.plot(centers, amp_pos / norm, "-o", color="#1f77b4", linewidth=1.4, markersize=3, label="Amp+ bins")
-            if amp_neg.size and edges_pos.size == amp_neg.size + 1:
-                centers = (edges_pos[:-1] + edges_pos[1:]) / 2.0
-                norm = np.max(amp_neg) or 1.0
-                ax_top.plot(centers, amp_neg / norm, "-o", color="#d62728", linewidth=1.4, markersize=3, label="Amp- bins")
-            if (amp_pos.size or amp_neg.size) and edges_pos.size:
-                ax_top.set_xlim(edges_pos[0], edges_pos[-1])
-                ax_top.grid(True, alpha=0.15)
+                if amp_pos.size:
+                    norm = float(np.max(amp_pos) or 1.0)
+                    inset.plot(centers, amp_pos / norm, "-o", color="#1f77b4", linewidth=1.3, markersize=3, label="Amp+")
+                if amp_neg.size:
+                    norm = float(np.max(amp_neg) or 1.0)
+                    inset.plot(centers, amp_neg / norm, "-o", color="#d62728", linewidth=1.3, markersize=3, label="Amp-")
+                inset.set_yticks([])
+                inset.set_title("Amp hist (norm.)", fontsize=8.5, fontweight="bold")
                 try:
-                    ax_top.legend(loc="upper right", fontsize=8, frameon=True, facecolor="white", edgecolor="#d9d9d9")
+                    inset.legend(loc="upper right", fontsize=8, frameon=True, facecolor="white", edgecolor="#d9d9d9")
                 except Exception:
                     pass
         except Exception:
             pass
-        _add_block(ax_top, hist_lines)
 
-        # Bloque metrics_advanced resumen
-        ax_bottom = self.ax_filtered
-        ax_bottom.set_visible(True)
-        lines2 = ["Metrics advanced", "----------------",]
+        _draw_kv_table(ax_hist, hist_rows, y_top=0.52, y_bottom=0.12, cols=2)
+
+        # Metrics advanced: extraer sub-métricas útiles (evita que quede vacío)
+        adv_y = _draw_card(ax_adv, "Metrics advanced", subtitle="Resumen", accent="#e8eefc")
+        adv_rows: list[tuple[str, str]] = []
         if isinstance(adv, dict) and adv:
+            phase_corr = adv.get("phase_corr")
+            pulses_ratio = adv.get("pulses_ratio")
+            heuristic_top = adv.get("heuristic_top")
+            skew_pos = (adv.get("skewness") or {}).get("pos_skew") if isinstance(adv.get("skewness"), dict) else None
+            skew_neg = (adv.get("skewness") or {}).get("neg_skew") if isinstance(adv.get("skewness"), dict) else None
+            kurt_pos = (adv.get("kurtosis") or {}).get("pos_kurt") if isinstance(adv.get("kurtosis"), dict) else None
+            kurt_neg = (adv.get("kurtosis") or {}).get("neg_kurt") if isinstance(adv.get("kurtosis"), dict) else None
+            med = adv.get("phase_medians_p95") if isinstance(adv.get("phase_medians_p95"), dict) else {}
+            med_pos = (med or {}).get("median_pos_phase")
+            med_neg = (med or {}).get("median_neg_phase")
+            p95_amp = (med or {}).get("p95_amp")
+
+            adv_rows.extend(
+                [
+                    ("phase_corr", _fmt(phase_corr, 3)),
+                    ("pulses_ratio", _fmt(pulses_ratio, 3)),
+                    ("heuristic_top", _fmt(heuristic_top, 0)),
+                    ("skewness +/-", f"{_fmt(skew_pos, 2)} / {_fmt(skew_neg, 2)}"),
+                    ("kurtosis +/-", f"{_fmt(kurt_pos, 2)} / {_fmt(kurt_neg, 2)}"),
+                    ("median phase +/-", f"{_fmt(med_pos, 1, '°')} / {_fmt(med_neg, 1, '°')}"),
+                    ("p95_amp", _fmt(p95_amp, 1)),
+                ]
+            )
+            # Añadir algunos escalares extra si existen
             for k, v in adv.items():
+                if k in ("phase_corr", "pulses_ratio", "heuristic_top", "skewness", "kurtosis", "phase_medians_p95", "hist"):
+                    continue
                 if isinstance(v, dict):
                     continue
-                lines2.append(f"• {k:<16}: {_fmt(v,3)}")
-                if len(lines2) > 12:
+                if v is None:
+                    continue
+                adv_rows.append((str(k), _fmt(v, 3)))
+                if len(adv_rows) >= 12:
                     break
         else:
-            lines2.append("No se encontraron métricas avanzadas.")
-        _add_block(ax_bottom, lines2)
+            adv_rows = [("Metrics", "N/D")]
+        _draw_kv_table(ax_adv, adv_rows, y_top=adv_y - 0.03, y_bottom=0.12, cols=2)
 
-        # Panel ang_proj_kpis y fa_kpis en ax_probs/ax_text
-        ax_ang = self.ax_probs
-        ax_ang.set_visible(True)
-        lines_ang = ["ANGPD 2.0 (proyecciones)", "-------------------------"]
-        if ang_kpi:
-            sym_val = ang_kpi.get("phase_symmetry")
-            warn = " (!)" if sym_val is not None and float(sym_val) < 0.95 else ""
-            lines_ang += [
-                f"• Phase width : {_fmt(ang_kpi.get('phase_width_deg'),1)}°",
-                f"• Phase sym   : {_fmt(sym_val,3)}{warn}",
-                f"• Phase peaks : {_fmt(ang_kpi.get('phase_peaks'),0)}",
-                f"• Amp conc    : {_fmt(ang_kpi.get('amp_concentration'),3)}",
-                f"• Amp peaks   : {_fmt(ang_kpi.get('amp_peaks'),0)}",
+        # ANGPD 2.0
+        ang_y = _draw_card(ax_ang, "ANGPD 2.0", subtitle="Proyecciones", accent="#efe3ff")
+        ang_rows: list[tuple[str, str]] = []
+        if isinstance(ang_kpi, dict) and ang_kpi:
+            try:
+                sym_val = float(ang_kpi.get("phase_symmetry")) if ang_kpi.get("phase_symmetry") is not None else None
+            except Exception:
+                sym_val = None
+            warn = " (!)" if sym_val is not None and sym_val < 0.95 else ""
+            ang_rows = [
+                ("phase_width", _fmt(ang_kpi.get("phase_width_deg"), 1, "°")),
+                ("phase_sym", f"{_fmt(sym_val, 3)}{warn}"),
+                ("phase_peaks", _fmt(ang_kpi.get("phase_peaks"), 0)),
+                ("amp_conc", _fmt(ang_kpi.get("amp_concentration"), 3)),
+                ("amp_peaks", _fmt(ang_kpi.get("amp_peaks"), 0)),
             ]
         else:
-            lines_ang.append("No se encontraron métricas ANGPD 2.0.")
-        _add_block(ax_ang, lines_ang, face="#f9f6ff")
+            ang_rows = [("ANGPD 2.0", "N/D")]
+        _draw_kv_table(ax_ang, ang_rows, y_top=ang_y - 0.03, y_bottom=0.14, cols=1)
 
-        ax_fa = self.ax_text
-        ax_fa.set_visible(True)
-        lines_fa = ["FA profile", "----------"]
-        if fa_kpi:
-            lines_fa += [
-                f"• phase_width : {_fmt(fa_kpi.get('phase_width_deg'),1)}°",
-                f"• phase_center: {_fmt(fa_kpi.get('phase_center_deg'),1)}°",
-                f"• symmetry    : {_fmt(fa_kpi.get('symmetry_index'),3)}",
-                f"• conc_index  : {_fmt(fa_kpi.get('ang_amp_concentration_index'),3)}",
-                f"• p95_amp     : {_fmt(fa_kpi.get('p95_amplitude'),1)}",
+        # FA profile
+        fa_y = _draw_card(ax_fa, "FA profile", subtitle="KPIs", accent="#dcf7ee")
+        fa_rows: list[tuple[str, str]] = []
+        if isinstance(fa_kpi, dict) and fa_kpi:
+            fa_rows = [
+                ("phase_width", _fmt(fa_kpi.get("phase_width_deg"), 1, "°")),
+                ("phase_center", _fmt(fa_kpi.get("phase_center_deg"), 1, "°")),
+                ("symmetry", _fmt(fa_kpi.get("symmetry_index"), 3)),
+                ("conc_index", _fmt(fa_kpi.get("ang_amp_concentration_index"), 3)),
+                ("p95_amp", _fmt(fa_kpi.get("p95_amplitude"), 1)),
             ]
         else:
-            lines_fa.append("No se encontraron KPIs FA.")
-        _add_block(ax_fa, lines_fa, face="#f6fffa")
+            fa_rows = [("FA KPIs", "N/D")]
+        _draw_kv_table(ax_fa, fa_rows, y_top=fa_y - 0.03, y_bottom=0.14, cols=1)
 
         self.canvas.draw_idle()
 
