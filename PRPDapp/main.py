@@ -5,7 +5,8 @@ from __future__ import annotations
 
  
 
-import sys, os, json, traceback, re, subprocess
+import sys, os, json, traceback, re, subprocess, copy
+import socket, time, shutil
 from pathlib import Path
 import numpy as np
 
@@ -18,6 +19,7 @@ from PySide6.QtWidgets import (
 from PySide6.QtGui import QPixmap, QFont, QAction, QGuiApplication
 from PySide6.QtCore import Qt
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
+import matplotlib as mpl
 import matplotlib.pyplot as plt
 from matplotlib.figure import Figure
 from matplotlib.image import imread
@@ -41,6 +43,7 @@ from PRPDapp.logic import compute_pd_metrics as logic_compute_pd_metrics, classi
 from PRPDapp import ui_dialogs, ui_draw, ui_render, ui_layout, ui_events
 from PRPDapp.logic_hist import compute_semicycle_histograms_from_aligned
 from PRPDapp.conclusion_rules import build_conclusion_block
+from PRPDapp.ang_proj import compute_ang_proj, compute_ang_proj_kpis
 
 
 
@@ -83,7 +86,13 @@ class PRPDWindow(QMainWindow):
         self._last_ann_probs: dict[str, float] = {}
         self.manual_override: dict = {"enabled": False}
         self.gap_ext_files: list[Path] = []
+        self._result_cache: dict[str, dict] = {}
+        self._current_cache_key: str | None = None
+        self._pipeline_version: str = "postmask_pixel_v3"
         self.banner_dark_mode: bool = False
+        self._dash3d_proc: subprocess.Popen | None = None
+        self._dash3d_port: int | None = None
+        self._dash3d_log: Path | None = None
         self._hist_bins_phase = 32
         self._hist_bins_amp = 32
         self._dark_stylesheet = """
@@ -159,6 +168,155 @@ class PRPDWindow(QMainWindow):
         # Ajuste de tamaño al iniciar
         self._apply_default_size()
 
+
+    def _dash_python_executable(self) -> Path:
+        """Devuelve el Python preferido para el Dash (venv local si existe)."""
+        if os.name == "nt":
+            cand = _PKG / ".venv" / "Scripts" / "python.exe"
+        else:
+            cand = _PKG / ".venv" / "bin" / "python"
+        return cand if cand.exists() else Path(sys.executable)
+
+    def _find_offline_wheels_dir(self) -> Path | None:
+        """Devuelve la carpeta de wheels offline si existe (portable)."""
+        candidates = [
+            _ROOT / "wheels",  # portable (al lado del .bat)
+            _PKG / "wheels",   # alternativa
+            Path.cwd() / "wheels",
+        ]
+        for p in candidates:
+            try:
+                if p.exists() and p.is_dir():
+                    return p
+            except Exception:
+                continue
+        return None
+
+    def _terminate_dash_3d(self) -> None:
+        """Cierra el visor Dash 3D anterior si fue lanzado desde la GUI."""
+        proc = getattr(self, "_dash3d_proc", None)
+        if proc is None:
+            return
+        try:
+            if proc.poll() is None:
+                proc.terminate()
+                try:
+                    proc.wait(timeout=2.0)
+                except Exception:
+                    proc.kill()
+        except Exception:
+            pass
+        finally:
+            self._dash3d_proc = None
+            self._dash3d_port = None
+
+    def _is_port_free(self, port: int) -> bool:
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                s.bind(("127.0.0.1", int(port)))
+            return True
+        except OSError:
+            return False
+
+    def _pick_dash_port(self, preferred: int = 8050) -> int:
+        preferred = int(preferred)
+        if self._is_port_free(preferred):
+            return preferred
+        for port in range(preferred + 1, preferred + 50):
+            if self._is_port_free(port):
+                return port
+        # fallback: puerto aleatorio del SO
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.bind(("127.0.0.1", 0))
+            return int(s.getsockname()[1])
+
+    def _wait_local_port(self, port: int, timeout_s: float = 6.0) -> bool:
+        deadline = time.time() + float(timeout_s)
+        while time.time() < deadline:
+            try:
+                with socket.create_connection(("127.0.0.1", int(port)), timeout=0.25):
+                    return True
+            except OSError:
+                time.sleep(0.15)
+        return False
+
+    def _ensure_dash_venv(self) -> Path:
+        """Asegura un venv local funcional para el visor Dash 3D y devuelve su python.exe."""
+        venv_dir = _PKG / ".venv"
+        py_exe = self._dash_python_executable()
+
+        def _run_py(cmd: list[str]) -> subprocess.CompletedProcess:
+            return subprocess.run(cmd, cwd=str(_PKG), check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+
+        def _python_works(p: Path) -> bool:
+            try:
+                r = subprocess.run(
+                    [str(p), "-c", "import sys; print(sys.version)"],
+                    cwd=str(_PKG),
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=15,
+                )
+                return r.returncode == 0
+            except Exception:
+                return False
+
+        # Si el venv existe pero no funciona (copiado de otra PC), respaldarlo y recrear.
+        if py_exe.exists() and not _python_works(py_exe):
+            try:
+                backup = _PKG / f".venv_broken_{time_tag()}"
+                try:
+                    shutil.move(str(venv_dir), str(backup))
+                except Exception:
+                    pass
+            except Exception:
+                pass
+            py_exe = self._dash_python_executable()
+
+        if not py_exe.exists():
+            base = Path(sys.executable) if sys.executable else Path()
+            if not base.exists():
+                found = shutil.which("python") or shutil.which("python3")
+                base = Path(found) if found else Path()
+            if not base.exists():
+                raise RuntimeError("No se encontró Python para crear el visor 3D (instala Python 3.10+).")
+            _run_py([str(base), "-m", "venv", str(venv_dir)])
+            py_exe = self._dash_python_executable()
+
+        # Asegurar pip y dependencias mínimas
+        try:
+            subprocess.run([str(py_exe), "-m", "pip", "--version"], cwd=str(_PKG), check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except Exception:
+            subprocess.run([str(py_exe), "-m", "ensurepip", "--upgrade"], cwd=str(_PKG), check=True)
+
+        required = ["dash", "plotly", "numpy", "kaleido"]
+        missing: list[str] = []
+        for pkg in required:
+            r = subprocess.run([str(py_exe), "-m", "pip", "show", pkg], cwd=str(_PKG), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            if r.returncode != 0:
+                missing.append(pkg)
+        if missing:
+            wheels_dir = self._find_offline_wheels_dir()
+            # Intento 1: instalación offline (portable) si hay carpeta wheels
+            if wheels_dir is not None:
+                r = subprocess.run(
+                    [str(py_exe), "-m", "pip", "install", "--no-index", "--find-links", str(wheels_dir), *missing, "--progress-bar", "off"],
+                    cwd=str(_PKG),
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                )
+                if r.returncode == 0:
+                    missing = []
+            # Intento 2: instalación online (PyPI) si sigue faltando algo
+            if missing:
+                subprocess.run([str(py_exe), "-m", "pip", "install", "--upgrade", "pip", "setuptools", "wheel", "--progress-bar", "off"], cwd=str(_PKG), check=True)
+                subprocess.run([str(py_exe), "-m", "pip", "install", *missing, "--progress-bar", "off"], cwd=str(_PKG), check=True)
+
+        if not _python_works(py_exe):
+            raise RuntimeError(f"El Python del visor 3D no se pudo ejecutar: {py_exe}")
+        return py_exe
 
     def _apply_default_size(self) -> None:
         """Ajusta la ventana al 90% del area disponible, con minimos seguros."""
@@ -254,6 +412,18 @@ class PRPDWindow(QMainWindow):
                 target_w = max(600.0, float(self.width()))
                 target_h = max(400.0, float(self.height()) - 140.0)
                 fig.set_size_inches(target_w / dpi, target_h / dpi, forward=True)
+                # En tamaños pequeños, aumentar un poco el margen inferior para que se vean
+                # los labels/ticks (eje X y el 0 en Y) sin recortes.
+                try:
+                    if target_h < 520:
+                        bottom = 0.14
+                    elif target_h < 650:
+                        bottom = 0.12
+                    else:
+                        bottom = 0.10
+                    fig.subplots_adjust(top=0.92, bottom=bottom, left=0.07, right=0.98, hspace=0.28, wspace=0.25)
+                except Exception:
+                    pass
             except Exception:
                 self._apply_default_size()
         try:
@@ -418,7 +588,10 @@ class PRPDWindow(QMainWindow):
             "ninguna": [],
             "corona+": [(45.0, 135.0)],
             "corona-": [(225.0, 315.0)],
-            "superficial": [(45.0, 135.0), (225.0, 315.0)],
+            # Superficial/tracking suele iniciar unas decenas de grados después del cruce por cero
+            # y extenderse gran parte del semiciclo. Mantener 2 ventanas (una por semiciclo)
+            # evita mezclar zonas cercanas a 0°/180° y sigue siendo “amplia” para no recortar en exceso.
+            "superficial": [(20.0, 170.0), (200.0, 350.0)],
             # Void: conservar rangos amplios alrededor de 0°/180° (envolviendo 360)
             "void": [(330.0, 360.0), (0.0, 60.0), (120.0, 240.0)],
         }
@@ -477,6 +650,14 @@ class PRPDWindow(QMainWindow):
             except Exception:
                 pass
 
+    def _set_warning(self, text: str) -> None:
+        """Muestra un aviso no modal en la barra inferior."""
+        lbl = getattr(self, "lbl_warning", None)
+        if lbl is None:
+            return
+        lbl.setText(text)
+        lbl.setVisible(bool(text))
+
     def _on_centers_combined_toggle(self, *_):
         """Refresca la vista combinada si está activa al cambiar el toggle de centros S3."""
         try:
@@ -518,6 +699,7 @@ class PRPDWindow(QMainWindow):
             selected = {dec for dec, cb in checks if cb.isChecked()}
             self.pixel_deciles_enabled = selected
             self._update_pixel_button_text()
+            self._refresh_last_result_filters()
 
     def _update_pixel_button_text(self) -> None:
         """Actualiza el texto del botón Pixel con un resumen de deciles."""
@@ -691,6 +873,7 @@ class PRPDWindow(QMainWindow):
         else:
             kpi_left_lines.append("Sin métricas disponibles.")
 
+        card_font = ["Segoe UI Emoji", "Segoe UI Symbol", "Consolas", "DejaVu Sans Mono"]
         for ax_card, lines, face, edge in (
             (self.ax_probs, kpi_left_lines, "#f7f9fc", "#c7d0e0"),
             (self.ax_text, ["🔍 KPIs – PRPD", "----------------", "Sin métricas disponibles."], "#f9f9f9", "#d8d8d8"),
@@ -702,7 +885,7 @@ class PRPDWindow(QMainWindow):
                 ha="left",
                 va="top",
                 fontsize=10,
-                fontfamily="monospace",
+                fontfamily=card_font,
                 bbox=dict(facecolor=face, alpha=0.92, boxstyle="round,pad=0.5", edgecolor=edge),
             )
 
@@ -1181,6 +1364,7 @@ class PRPDWindow(QMainWindow):
             self.qty_quintiles_enabled = selected_q
             self.qty_deciles_enabled = clean_qt
             self._update_qty_button_text()
+            self._refresh_last_result_filters()
 
     def _update_qty_button_text(self) -> None:
         if not hasattr(self, "btn_qty"):
@@ -1252,6 +1436,24 @@ class PRPDWindow(QMainWindow):
             "qty": tuple(sorted(self.qty_deciles_enabled)),          # Qt1-Qt10
             "qty_quints": tuple(sorted(self.qty_quintiles_enabled)), # Q1-Q5
         }
+
+    def _make_cache_key(self, profile: dict, source: Path | str | None) -> str:
+        """Genera una clave determinista para cachear resultados por perfil/archivo."""
+        src = Path(source).resolve() if source else Path("<none>")
+        parts = [f"src={src}"]
+        try:
+            parts.append(f"bins={int(self._hist_bins_phase)}x{int(self._hist_bins_amp)}")
+        except Exception:
+            parts.append("bins=32x32")
+        for k in sorted(profile.keys()):
+            parts.append(f"{k}={profile[k]}")
+        return "|".join(parts)
+
+    def _cache_result(self, key: str, result: dict) -> None:
+        try:
+            self._result_cache[key] = copy.deepcopy(result)
+        except Exception:
+            pass
 
     @staticmethod
     def _format_decile_token(values: tuple[int, ...]) -> str:
@@ -1386,10 +1588,174 @@ class PRPDWindow(QMainWindow):
         if labels_full.size:
             aligned["labels_aligned"] = labels_full[mask_keep]
 
-        if pixel_full.size:
-            aligned["pixel"] = pixel_full[mask_keep]
-        if labels_full.size:
-            aligned["labels_aligned"] = labels_full[mask_keep]
+    @staticmethod
+    def _build_qty_keep_mask(
+        quint_full: np.ndarray,
+        dec_full: np.ndarray,
+        keep_quints: list[int],
+        keep_deciles: list[int],
+    ) -> np.ndarray:
+        """Construye la máscara booleana para Q/Qt sobre arrays _full_*."""
+        n = int(quint_full.size)
+        if n <= 0:
+            return np.zeros(0, dtype=bool)
+
+        keep_q_set = {int(q) for q in keep_quints if 1 <= int(q) <= 5}
+        keep_sub_set = {int(k) for k in keep_deciles if 1 <= int(k) <= 10}
+        pairs = {1: {1, 2}, 2: {3, 4}, 3: {5, 6}, 4: {7, 8}, 5: {9, 10}}
+
+        all_quints = keep_q_set.issuperset({1, 2, 3, 4, 5})
+        all_deciles = (not keep_sub_set) or keep_sub_set == set(range(1, 11))
+        if all_quints and all_deciles:
+            return np.ones(n, dtype=bool)
+        if not keep_q_set:
+            return np.zeros(n, dtype=bool)
+
+        mask_keep = np.zeros(n, dtype=bool)
+        for q in range(1, 6):
+            if q not in keep_q_set:
+                continue
+            subs = pairs[q]
+            subs_on = {s for s in subs if s in keep_sub_set} if keep_sub_set else subs
+            if dec_full.size == 0:
+                mask_keep |= (quint_full == q)
+            else:
+                if not subs_on:
+                    continue
+                mask_keep |= (quint_full == q) & np.isin(dec_full, list(subs_on))
+        return mask_keep
+
+    def _apply_view_filters(
+        self,
+        result: dict,
+        *,
+        pixel_deciles_keep: list[int],
+        qty_quints_keep: list[int],
+        qty_deciles_keep: list[int],
+    ) -> None:
+        """Aplica Pixel + Qty como filtros de vista sobre arrays _full_* (sin reprocesar)."""
+        aligned = result.get("aligned", {}) or {}
+        phase_full = np.asarray(aligned.get("_full_phase_deg", aligned.get("phase_deg", [])), dtype=float)
+        amp_full = np.asarray(aligned.get("_full_amplitude", aligned.get("amplitude", [])), dtype=float)
+        qty_full = np.asarray(aligned.get("_full_quantity", aligned.get("quantity", [])), dtype=float)
+        dec_full = np.asarray(aligned.get("_full_qty_deciles", aligned.get("qty_deciles", [])), dtype=int)
+        quint_full = np.asarray(aligned.get("_full_qty_quintiles", aligned.get("qty_quintiles", [])), dtype=int)
+        pixel_full = np.asarray(aligned.get("_full_pixel", aligned.get("pixel", [])), dtype=float)
+        labels_full = np.asarray(aligned.get("_full_labels_aligned", aligned.get("labels_aligned", [])))
+
+        n = int(phase_full.size)
+        if n <= 0:
+            return
+
+        keep_mask = np.ones(n, dtype=bool)
+
+        # Pixel: deciles por magnitud de amplitud (equal-frequency) como filtro de vista.
+        keep_set = {int(d) for d in pixel_deciles_keep if 1 <= int(d) <= 10}
+        if not keep_set:
+            keep_mask &= False
+        elif keep_set != set(range(1, 11)):
+            pix_dec = np.asarray(aligned.get("_full_pixel_deciles", []), dtype=int)
+            if pix_dec.size != n:
+                mag = np.clip(np.abs(amp_full), 0.0, 100.0)
+                pix_dec = self._equal_frequency_bucket(mag, groups=10)
+                aligned["_full_pixel_deciles"] = pix_dec
+            keep_mask &= np.isin(pix_dec, list(keep_set))
+
+        # Qty: máscara booleana sobre los buckets precomputados.
+        if quint_full.size == n:
+            keep_mask &= self._build_qty_keep_mask(quint_full, dec_full, qty_quints_keep, qty_deciles_keep)
+
+        aligned["phase_deg"] = phase_full[keep_mask]
+        aligned["amplitude"] = amp_full[keep_mask]
+        if qty_full.size == n:
+            aligned["quantity"] = qty_full[keep_mask]
+        if quint_full.size == n:
+            aligned["qty_quintiles"] = quint_full[keep_mask]
+        if dec_full.size == n:
+            aligned["qty_deciles"] = dec_full[keep_mask]
+        if pixel_full.size == n:
+            aligned["pixel"] = pixel_full[keep_mask]
+        if labels_full.size == n:
+            aligned["labels_aligned"] = labels_full[keep_mask]
+
+    def _refresh_last_result_filters(self) -> None:
+        """Reaplica filtros Pixel/Qty actuales sobre el último resultado y re-renderiza."""
+        if not self.last_result or not self.current_path:
+            return
+        try:
+            qty_deciles, qty_quints = self._get_qty_filters()
+            pixel_deciles = self._get_pixel_deciles_selection()
+            self._apply_view_filters(
+                self.last_result,
+                pixel_deciles_keep=pixel_deciles,
+                qty_quints_keep=qty_quints,
+                qty_deciles_keep=qty_deciles,
+            )
+            self._recompute_angpd_metrics(self.last_result)
+            profile = self._collect_current_profile()
+            cache_key = self._make_cache_key(profile, self.current_path)
+            self._current_cache_key = cache_key
+            self._cache_result(cache_key, self.last_result)
+            self.last_run_profile = profile
+            self.render_result(self.last_result)
+            self._set_warning("")
+        except Exception as exc:
+            traceback.print_exc()
+            self._set_warning(f"Reaplicar filtros falló: {exc}")
+
+    def _recompute_angpd_metrics(self, result: dict) -> None:
+        """Recalcula ANGPD/ANGPD qty y métricas derivadas sobre los datos alineados filtrados."""
+        aligned = result.get("aligned", {}) or {}
+        ph = np.asarray(aligned.get("phase_deg", []), dtype=float)
+        amp = np.asarray(aligned.get("amplitude", []), dtype=float)
+        qty = np.asarray(aligned.get("quantity", []), dtype=float)
+
+        try:
+            weights_amp = np.abs(amp) if amp.size else None
+            angpd = core._compute_angpd(ph, bins=72, weights=weights_amp)  # type: ignore[attr-defined]
+            if qty.size:
+                wq = qty if qty.size else None
+                ang_q = core._compute_angpd(ph, bins=72, weights=wq)  # type: ignore[attr-defined]
+                angpd["angpd_qty"] = ang_q.get("angpd", np.zeros(0))
+                angpd["n_angpd_qty"] = ang_q.get("n_angpd", np.zeros(0))
+            else:
+                angpd["angpd_qty"] = np.zeros_like(angpd.get("angpd", np.zeros(0)))
+                angpd["n_angpd_qty"] = np.zeros_like(angpd.get("n_angpd", np.zeros(0)))
+            result["angpd"] = angpd
+        except Exception:
+            pass
+
+        try:
+            bins_phase = getattr(self, "_hist_bins_phase", 32)
+            bins_amp = getattr(self, "_hist_bins_amp", 32)
+            result["metrics_advanced"] = compute_advanced_metrics(
+                {"aligned": aligned, "angpd": result.get("angpd", {})},
+                bins_amp=bins_amp,
+                bins_phase=bins_phase,
+            )
+        except Exception:
+            result["metrics_advanced"] = result.get("metrics_advanced", {})
+
+        try:
+            result["metrics"] = logic_compute_pd_metrics(result, gap_stats=result.get("gap_stats"))
+        except Exception:
+            result["metrics"] = result.get("metrics", {})
+
+        try:
+            ang_proj = compute_ang_proj(aligned, n_phase_bins=32, n_amp_bins=16, n_points=64)
+            ang_proj_kpis = compute_ang_proj_kpis(ang_proj)
+            result["ang_proj"] = ang_proj
+            result["ang_proj_kpis"] = ang_proj_kpis
+        except Exception:
+            pass
+
+        try:
+            fa_profile = core.compute_fa_profile(aligned, bin_width_deg=6.0, smooth_window_bins=5)
+            fa_kpis = core.compute_fa_kpis(aligned, fa_profile)
+            result["fa_profile"] = fa_profile
+            result["fa_kpis"] = fa_kpis
+        except Exception:
+            pass
 
     @staticmethod
     def _equal_frequency_bucket(values: np.ndarray, groups: int = 5) -> np.ndarray:
@@ -1776,6 +2142,31 @@ class PRPDWindow(QMainWindow):
             pixel_deciles = self._get_pixel_deciles_selection()
             qty_deciles, qty_quints = self._get_qty_filters()
 
+            profile = self._collect_current_profile()
+            # Incluir los intervalos efectivos en la cache key para no reusar resultados
+            # si cambia el preset de la máscara (o si la máscara depende de otros parámetros).
+            try:
+                profile["mask_ranges"] = tuple((float(a), float(b)) for a, b in (mask_ranges or []))
+            except Exception:
+                profile["mask_ranges"] = tuple()
+            try:
+                profile["pipeline_version"] = str(getattr(self, "_pipeline_version", "v0"))
+            except Exception:
+                profile["pipeline_version"] = "v0"
+            cache_key = self._make_cache_key(profile, self.current_path)
+            self._current_cache_key = cache_key
+            cached = self._result_cache.get(cache_key)
+            if cached:
+                try:
+                    self.last_result = copy.deepcopy(cached)
+                    self.last_run_profile = profile
+                    self.render_result(self.last_result)
+                    self.btn_pdf.setEnabled(True)
+                    self._set_warning("")
+                    return
+                except Exception:
+                    pass
+
             # Procesar PRPD utilizando el offset de fase, filtro y máscara/pixel
             result = core.process_prpd(
                 path=self.current_path,
@@ -1784,37 +2175,29 @@ class PRPDWindow(QMainWindow):
                 fast_mode=False,
                 filter_level=filt_label,
                 phase_mask=mask_ranges,
-                pixel_deciles_keep=pixel_deciles,
+                pixel_deciles_keep=None,
             )
             if self.chk_gap.isChecked():
                 gx = getattr(self, "_gap_xml_path", None)
                 if gx:
                     result["gap_stats"] = self._compute_gap(gx) or {}
-            # KPIs básicos (métricas clásicas)
-            try:
-                result["metrics"] = logic_compute_pd_metrics(result, gap_stats=result.get("gap_stats"))
-            except Exception:
-                result["metrics"] = {}
             # Calcular cortes globales de quantity (Q/Qt) una sola vez
             try:
                 self._precompute_qty_buckets(result)
             except Exception:
                 pass
-            # KPIs avanzados y clasificador heurístico
-            try:
-                bins_phase = getattr(self, "_hist_bins_phase", 32)
-                bins_amp = getattr(self, "_hist_bins_amp", 32)
-                result["metrics_advanced"] = compute_advanced_metrics(
-                    {"aligned": result.get("aligned", {}), "angpd": result.get("angpd", {})},
-                    bins_amp=bins_amp,
-                    bins_phase=bins_phase,
-                )
-            except Exception:
-                result["metrics_advanced"] = {}
             self.last_result = result
             self.last_run_profile = self._collect_current_profile()
-            self._apply_qty_filters(result, qty_quints, qty_deciles)
+            self._apply_view_filters(
+                result,
+                pixel_deciles_keep=pixel_deciles,
+                qty_quints_keep=qty_quints,
+                qty_deciles_keep=qty_deciles,
+            )
+            self._recompute_angpd_metrics(result)
             self._ann_history_written = False
+            self._cache_result(cache_key, result)
+            self._set_warning("")
 
             # Pintar en GUI
             self.render_result(result)
@@ -1844,13 +2227,16 @@ class PRPDWindow(QMainWindow):
 
         except FileNotFoundError as e:
             # Archivo o ruta no encontrada
+            self._set_warning(str(e))
             QMessageBox.critical(self, "Error en pipeline", f"Archivo o ruta no encontrado: {e}")
         except ValueError as e:
             # Errores de valor durante el procesamiento
+            self._set_warning(str(e))
             QMessageBox.critical(self, "Error en pipeline", f"Error de valor: {e}")
         except Exception as e:
             # Otras excepciones imprevistas
             traceback.print_exc()
+            self._set_warning(str(e))
             QMessageBox.critical(self, "Error en pipeline", str(e))
 
     # Ayuda
@@ -1865,8 +2251,86 @@ class PRPDWindow(QMainWindow):
         except Exception:
             QMessageBox.information(self, "README", f"Abre: {readme}")
 
+    def on_clear_cache_clicked(self) -> None:
+        """Limpia la caché de resultados procesados."""
+        try:
+            self._result_cache.clear()
+            self._current_cache_key = None
+            self._set_warning("Caché vaciada")
+        except Exception as e:
+            self._set_warning(f"No se pudo vaciar la caché: {e}")
+
 
         # UI handlers
+    def on_open_dash_3d(self) -> None:
+        """Abre el Dash 3D usando el XML actualmente cargado en la GUI."""
+        if not self.current_path:
+            QMessageBox.information(self, "3D", "Carga primero un PRPD (CSV/XML).")
+            return
+        xml_path = Path(self.current_path).expanduser()
+        if not xml_path.exists():
+            QMessageBox.warning(self, "3D", f"No se encontro el archivo:\n{xml_path}")
+            return
+        if xml_path.suffix.lower() != ".xml":
+            QMessageBox.information(self, "3D", "El visor 3D requiere un archivo XML. Carga un PRPD en formato XML.")
+            return
+        dash_script = _PKG / "PRPD_Dash.py"
+        if not dash_script.exists():
+            QMessageBox.critical(self, "3D", f"No se encontro el script PRPD_Dash.py en:\n{dash_script}")
+            return
+
+        # Cerrar visor anterior para evitar que el navegador muestre el PRPD anterior por el mismo puerto.
+        self._terminate_dash_3d()
+
+        try:
+            py_exe = self._ensure_dash_venv()
+            port = self._pick_dash_port(8050)
+            log_dir = _PKG / "dash3d_logs"
+            log_dir.mkdir(parents=True, exist_ok=True)
+            log_path = log_dir / f"dash3d_{xml_path.stem}_{time_tag()}.log"
+            self._dash3d_log = log_path
+            with open(log_path, "w", encoding="utf-8") as logf:
+                logf.write(f"[dash3d] py_exe={py_exe}\n")
+                logf.write(f"[dash3d] dash_script={dash_script}\n")
+                logf.write(f"[dash3d] xml={xml_path}\n")
+                logf.write(f"[dash3d] cwd={_PKG}\n")
+                logf.write(f"[dash3d] port={port}\n\n")
+                logf.flush()
+                self._dash3d_proc = subprocess.Popen(
+                    [str(py_exe), str(dash_script), str(xml_path.resolve()), "--port", str(port)],
+                    cwd=str(_PKG),
+                    stdout=logf,
+                    stderr=logf,
+                )
+            self._dash3d_port = port
+
+            url = f"http://127.0.0.1:{port}/"
+            try:
+                import webbrowser
+                # Abrir siempre: si tarda en levantar, el usuario puede refrescar.
+                webbrowser.open(url)
+            except Exception:
+                pass
+            ready = self._wait_local_port(port, timeout_s=12.0)
+            if ready:
+                QMessageBox.information(self, "3D", f"Abriendo visor 3D para:\n{xml_path.name}\n\nURL: {url}")
+            else:
+                QMessageBox.warning(
+                    self,
+                    "3D",
+                    "El visor 3D no respondió en 6s.\n"
+                    "Revisa el log de arranque (errores de Dash/dependencias) y vuelve a intentar.\n\n"
+                    f"Archivo: {xml_path.name}\nURL: {url}\n\nLog:\n{log_path}",
+                )
+        except Exception as e:
+            extra = ""
+            try:
+                if getattr(self, "_dash3d_log", None):
+                    extra = f"\n\nLog:\n{self._dash3d_log}"
+            except Exception:
+                pass
+            QMessageBox.critical(self, "3D", f"No se pudo abrir el visor 3D:\n{e}{extra}")
+
     def open_file_dialog(self) -> None:
         fn, _ = QFileDialog.getOpenFileName(self, "Selecciona archivo PRPD (CSV/XML)", "", "PRPD (*.csv *.xml);;CSV (*.csv);;XML (*.xml);;Todos (*.*)")
         if not fn:
@@ -4658,7 +5122,7 @@ class PRPDWindow(QMainWindow):
         fast_mode = False
         mask_ranges = self._get_phase_mask_ranges()
         pixel_deciles = self._get_pixel_deciles_selection()
-        qty_deciles = self._get_qty_deciles_selection()
+        qty_deciles, qty_quints = self._get_qty_filters()
         # Guardar resultados completos por cada archivo y filtro
         for i, xp in enumerate(xmls, 1):
             try:
@@ -4680,19 +5144,17 @@ class PRPDWindow(QMainWindow):
                             fast_mode=fast_mode,
                             filter_level=flabel,
                             phase_mask=mask_ranges,
-                            pixel_deciles_keep=pixel_deciles,
+                            pixel_deciles_keep=None,
                         )
                         try:
                             self._precompute_qty_buckets(res)
-                            self._apply_qty_filters(res, qty_quints, qty_deciles)
-                            bins_phase = getattr(self, "_hist_bins_phase", 32)
-                            bins_amp = getattr(self, "_hist_bins_amp", 32)
-                            res["metrics_advanced"] = compute_advanced_metrics(
-                                {"aligned": res.get("aligned", {}), "angpd": res.get("angpd", {})},
-                                bins_amp=bins_amp,
-                                bins_phase=bins_phase,
+                            self._apply_view_filters(
+                                res,
+                                pixel_deciles_keep=pixel_deciles,
+                                qty_quints_keep=qty_quints,
+                                qty_deciles_keep=qty_deciles,
                             )
-                            res["metrics"] = logic_compute_pd_metrics(res, gap_stats=res.get("gap_stats"))
+                            self._recompute_angpd_metrics(res)
                         except Exception:
                             pass
                         # Guardar resultados básicos para el summary
@@ -4740,6 +5202,18 @@ class PRPDWindow(QMainWindow):
 
 def main() -> None:
     app = QApplication(sys.argv)
+    # Escalado ligero de tipografías según DPI principal
+    try:
+        screen = app.primaryScreen() or QGuiApplication.primaryScreen()
+        if screen is not None:
+            dpi = float(getattr(screen, "logicalDotsPerInch", lambda: screen.logicalDotsPerInchX())())
+            base_dpi = 96.0
+            scale = dpi / base_dpi if base_dpi > 0 else 1.0
+            scale = max(0.8, min(scale, 1.4))
+            base_font_size = 9.0
+            mpl.rcParams["font.size"] = base_font_size * scale
+    except Exception:
+        pass
     w = PRPDWindow()
     w.show()
     sys.exit(app.exec())
@@ -4766,6 +5240,3 @@ if __name__ == "__main__":
         _cli_followup(sys.argv[2:])
     else:
         main()
-
-
-

@@ -1,6 +1,7 @@
 # Build/output
 out/
 seguimiento/
+release/
 
 # Python cache
 __pycache__/
@@ -11,6 +12,11 @@ __pycache__/
 # Backups / temp
 *.tmp
 *.bak
+PRPD_backup_codex_*.zip
+
+# Local test files
+mascarasuperfialerror.xml
+PRPDapp/time_*.xml
 
 # OS
 .DS_Store

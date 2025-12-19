@@ -172,13 +172,16 @@ def render_conclusions(wnd, result: dict, payload: dict | None = None) -> None:
     }
     wnd._draw_conclusion_header(ax, "Resultados de los principales KPI", None)
 
-    left_card = FancyBboxPatch((0.02, 0.15), 0.47, 0.74, boxstyle="round,pad=0.02", linewidth=1.0, facecolor="#ffffff", edgecolor="#d9d4c7")
-    right_card = FancyBboxPatch((0.51, 0.15), 0.47, 0.74, boxstyle="round,pad=0.02", linewidth=1.0, facecolor="#ffffff", edgecolor="#d9d4c7")
+    # Cards más altos: la vista Conclusiones suele tener poco alto útil por los controles/banners.
+    cards_y = 0.08
+    cards_h = 0.82
+    left_card = FancyBboxPatch((0.02, cards_y), 0.47, cards_h, boxstyle="round,pad=0.02", linewidth=1.0, facecolor="#ffffff", edgecolor="#d9d4c7")
+    right_card = FancyBboxPatch((0.51, cards_y), 0.47, cards_h, boxstyle="round,pad=0.02", linewidth=1.0, facecolor="#ffffff", edgecolor="#d9d4c7")
     wnd._register_conclusion_artist(ax.add_patch(left_card))
     wnd._register_conclusion_artist(ax.add_patch(right_card))
 
-    left_ax = ax.inset_axes([0.03, 0.18, 0.44, 0.66])
-    right_ax = ax.inset_axes([0.52, 0.18, 0.44, 0.66])
+    left_ax = ax.inset_axes([0.03, cards_y + 0.03, 0.44, cards_h - 0.06])
+    right_ax = ax.inset_axes([0.52, cards_y + 0.03, 0.44, cards_h - 0.06])
     for sub in (left_ax, right_ax):
         sub.set_axis_off()
         sub.set_xlim(0, 1)
@@ -244,6 +247,7 @@ def render_conclusions(wnd, result: dict, payload: dict | None = None) -> None:
     p95_adv = m_adv.get("phase_medians_p95", {}).get("p95_amp")
     pulses_ratio = m_adv.get("pulses_ratio")
 
+    # Lista compacta: Conclusiones debe mostrar "principales KPI" sin saturar la tarjeta.
     triplets = [
         ("Total pulsos utiles",
          _fmt_value(metrics.get("total_count"), decimals=0),
@@ -273,39 +277,11 @@ def render_conclusions(wnd, result: dict, payload: dict | None = None) -> None:
          None,
          False,
          0.26),
-        ("Skewness (fase)",
-         "-",
-         _fmt_value(skew_pos, decimals=2),
-         _fmt_value(skew_neg, decimals=2),
-         None,
-         False,
-         0.26),
-        ("Kurtosis (fase)",
-         "-",
-         _fmt_value(kurt_pos, decimals=2),
-         _fmt_value(kurt_neg, decimals=2),
-         None,
-         False,
-         0.26),
-        ("Mediana fase",
-         "-",
-         _fmt_angle(med_pos),
-         _fmt_angle(med_neg),
-         None,
-         False,
-         0.26),
         ("P95 amplitud",
          _fmt_value(metrics.get("p95_mean")),
          _fmt_value(metrics.get("amp_p95_pos")),
          _fmt_value(metrics.get("amp_p95_neg")),
          wnd._status_from_amp(metrics.get("p95_mean")),
-         False,
-         0.26),
-        ("P95 amplitud (qty)",
-         _fmt_value(p95_adv),
-         "-",
-         "-",
-         None,
          False,
          0.26),
         ("Correlacion fases",
@@ -320,41 +296,48 @@ def render_conclusions(wnd, result: dict, payload: dict | None = None) -> None:
          "-",
          "-",
          None,
-         False,
-         0.26),
+          False,
+          0.26),
     ]
+
+    def _draw_card_section(ax_target, title: str, *, y: float = 0.97, x: float = 0.02, size: int = 12) -> float:
+        title_art = ax_target.text(
+            x,
+            y,
+            title.upper(),
+            fontsize=size,
+            fontweight="bold",
+            ha="left",
+            va="center",
+            color="#0f172a",
+            bbox=dict(boxstyle="round,pad=0.22", facecolor="#e8eefc", edgecolor="none"),
+        )
+        line = ax_target.plot([x, 0.98], [y - 0.032, y - 0.032], color="#e1e5eb", linewidth=1.2)[0]
+        wnd._register_conclusion_artist(title_art)
+        wnd._register_conclusion_artist(line)
+        return y - 0.085
 
     def _draw_triplet_row(ax_target, y_val, label, total_val, pos_val, neg_val, badge, show_badge, badge_x):
         label_fmt = (label[:1].upper() + label[1:]) if label else "N/D"
-        wnd._register_conclusion_artist(ax_target.text(0.02, y_val, label_fmt, fontsize=12, fontweight="bold", ha="left", va="center", color="#0f172a"))
-        wnd._register_conclusion_artist(ax_target.text(0.38, y_val, total_val, fontsize=12, ha="left", va="center", color="#111827"))
-        wnd._register_conclusion_artist(ax_target.text(0.60, y_val, pos_val, fontsize=11.5, ha="left", va="center", color="#0d47a1"))
-        wnd._register_conclusion_artist(ax_target.text(0.80, y_val, neg_val, fontsize=11.5, ha="left", va="center", color="#b23c17"))
+        wnd._register_conclusion_artist(ax_target.text(0.02, y_val, label_fmt, fontsize=10.5, fontweight="bold", ha="left", va="center", color="#0f172a"))
+        wnd._register_conclusion_artist(ax_target.text(0.38, y_val, total_val, fontsize=10.5, ha="left", va="center", color="#111827"))
+        wnd._register_conclusion_artist(ax_target.text(0.60, y_val, pos_val, fontsize=10.2, ha="left", va="center", color="#0d47a1"))
+        wnd._register_conclusion_artist(ax_target.text(0.80, y_val, neg_val, fontsize=10.2, ha="left", va="center", color="#b23c17"))
         if badge and show_badge:
             text_badge, color_badge = badge
-            wnd._register_conclusion_artist(wnd._draw_status_tag(ax_target, text_badge, badge_x, y_val, color=color_badge))
+            wnd._register_conclusion_artist(wnd._draw_status_tag(ax_target, text_badge, badge_x, y_val, color=color_badge, size=10))
 
-    y_left = wnd._draw_section_title(left_ax, "Indicadores clave", y=0.98)
-    header_y = y_left + 0.05
-    wnd._register_conclusion_artist(left_ax.text(0.38, header_y, "TOTAL", fontsize=10, fontweight="bold", color="#1f2933"))
-    wnd._register_conclusion_artist(left_ax.text(0.60, header_y, "SEMICICLO +", fontsize=10, fontweight="bold", color="#0d47a1"))
-    wnd._register_conclusion_artist(left_ax.text(0.80, header_y, "SEMICICLO -", fontsize=10, fontweight="bold", color="#b23c17"))
-    wnd._register_conclusion_artist(left_ax.plot([0.02, 0.95], [header_y - 0.02, header_y - 0.02], color="#e0e0e0", linewidth=1.0)[0])
-    y_left -= 0.025
-    for entry in triplets:
-        label, total_val, pos_val, neg_val, status = entry[:5]
-        show_badge = entry[5] if len(entry) > 5 else False
-        badge_x = entry[6] if len(entry) > 6 else 0.26
-        _draw_triplet_row(left_ax, y_left, label, total_val, pos_val, neg_val, _status_or_default(status), show_badge, badge_x)
-        wnd._register_conclusion_artist(left_ax.plot([0.02, 0.95], [y_left - 0.025, y_left - 0.025], color="#f0f0f0", linewidth=0.8)[0])
-        y_left -= 0.07
+    # -----------------------
+    # Left card: tabla KPI
+    # -----------------------
+    y_left = _draw_card_section(left_ax, "Indicadores clave", y=0.97)
+    header_y = y_left + 0.028
+    wnd._register_conclusion_artist(left_ax.text(0.38, header_y, "TOTAL", fontsize=9, fontweight="bold", color="#1f2933"))
+    wnd._register_conclusion_artist(left_ax.text(0.60, header_y, "SEMICICLO +", fontsize=9, fontweight="bold", color="#0d47a1"))
+    wnd._register_conclusion_artist(left_ax.text(0.80, header_y, "SEMICICLO -", fontsize=9, fontweight="bold", color="#b23c17"))
+    wnd._register_conclusion_artist(left_ax.plot([0.02, 0.95], [header_y - 0.02, header_y - 0.02], color="#e5e7eb", linewidth=1.0)[0])
 
-    y_left -= 0.02
-    _draw_triplet_row(left_ax, y_left, "Gap-Time P50", _fmt_value(gap_p50, decimals=2, suffix=" ms"), "-", "-", _status_or_default(_gap_badge_tuple(gap_p50, gap_info)), True, 0.58)
-    y_left -= 0.075
-    _draw_triplet_row(left_ax, y_left, "Gap-Time P5", _fmt_value(gap_p5, decimals=2, suffix=" ms"), "-", "-", _status_or_default(_gap_badge_tuple(gap_p5, class_p5, default="Sin dato")), True, 0.58)
-    y_left -= 0.075
-
+    # Relación (usa ANN si está disponible para inferir el tipo)
     badge_rel = None
     pd_type_effective = summary.get("pd_type", "") if isinstance(summary.get("pd_type"), str) else ""
     ann_probs_badge = wnd._last_ann_probs or {}
@@ -374,7 +357,6 @@ def render_conclusions(wnd, result: dict, payload: dict | None = None) -> None:
     rel_val_raw = kpis.get("n_angpd_angpd_ratio") if kpis else None
     if rel_val_raw is None:
         rel_val_raw = metrics.get("n_ang_ratio")
-    rel_val = None
     try:
         rel_val = float(rel_val_raw)
     except Exception:
@@ -388,10 +370,8 @@ def render_conclusions(wnd, result: dict, payload: dict | None = None) -> None:
             else:
                 badge_rel = ("Estable", "#1565c0")
     rel_txt = f"{rel_val:.2f}" if rel_val is not None else "N/D"
-    _draw_triplet_row(left_ax, y_left, "Relacion N-ANGPD/ANGPD", rel_txt, "-", "-", badge_rel if badge_rel else ("", "#ffffff"), badge_rel is not None, 0.58)
-    y_left -= 0.075
 
-    # KPIs FA profile
+    # KPIs FA profile (resumen)
     def _fmt_fa(val, decimals=2):
         try:
             if val is None:
@@ -411,47 +391,141 @@ def render_conclusions(wnd, result: dict, payload: dict | None = None) -> None:
         ("Índice concentración FA", _fmt_fa(kpis.get("fa_concentration_index") or fa_kpis.get("ang_amp_concentration_index"))),
         ("P95 amplitud (FA)", _fmt_fa(kpis.get("fa_p95_amplitude") or fa_kpis.get("p95_amplitude"))),
     ]
+
+    # Espaciado adaptativo: evita que la tabla "se salga" del recuadro en pantallas bajas
+    y_cursor = y_left - 0.018
+    y_min = 0.055
+    gap_units = 0.45
+    fa_gap_units = 0.55
+    total_units = len(triplets) + gap_units + 2 + gap_units + 1 + fa_gap_units + len(fa_rows)
+    unit = (y_cursor - y_min) / max(total_units, 1.0)
+
+    for idx, entry in enumerate(triplets):
+        label, total_val, pos_val, neg_val, status = entry[:5]
+        show_badge = entry[5] if len(entry) > 5 else False
+        badge_x = entry[6] if len(entry) > 6 else 0.26
+        _draw_triplet_row(left_ax, y_cursor, label, total_val, pos_val, neg_val, _status_or_default(status), show_badge, badge_x)
+        if idx < len(triplets) - 1:
+            sep_y = y_cursor - unit * 0.48
+            wnd._register_conclusion_artist(left_ax.plot([0.02, 0.95], [sep_y, sep_y], color="#f3f4f6", linewidth=0.8)[0])
+        y_cursor -= unit
+
+    y_cursor -= unit * gap_units
+    _draw_triplet_row(
+        left_ax,
+        y_cursor,
+        "Gap-Time P50",
+        _fmt_value(gap_p50, decimals=2, suffix=" ms"),
+        "-",
+        "-",
+        _status_or_default(_gap_badge_tuple(gap_p50, gap_info)),
+        True,
+        0.58,
+    )
+    y_cursor -= unit
+    _draw_triplet_row(
+        left_ax,
+        y_cursor,
+        "Gap-Time P5",
+        _fmt_value(gap_p5, decimals=2, suffix=" ms"),
+        "-",
+        "-",
+        _status_or_default(_gap_badge_tuple(gap_p5, class_p5, default="Sin dato")),
+        True,
+        0.58,
+    )
+    y_cursor -= unit
+
+    y_cursor -= unit * gap_units
+    _draw_triplet_row(
+        left_ax,
+        y_cursor,
+        "Relación N-ANGPD/ANGPD",
+        rel_txt,
+        "-",
+        "-",
+        badge_rel if badge_rel else ("", "#ffffff"),
+        badge_rel is not None,
+        0.58,
+    )
+    y_cursor -= unit
+
+    y_cursor -= unit * fa_gap_units
     for label, val in fa_rows:
-        _draw_triplet_row(left_ax, y_left, label, val, "-", "-", ("", "#ffffff"), False, 0.26)
-        y_left -= 0.10
-    y_left -= 0.04
+        _draw_triplet_row(left_ax, y_cursor, label, val, "-", "-", ("", "#ffffff"), False, 0.26)
+        y_cursor -= unit
 
-    def _wrap_action_text(text_value: str) -> list[str]:
-        parts = []
-        for raw in (text_value or "").split("."):
-            chunk = raw.strip()
-            if not chunk:
-                continue
-            if len(chunk) > 60:
-                mid = chunk[:60].rfind(" ")
-                if mid > 20:
-                    parts.append(chunk[:mid].strip())
-                    parts.append(chunk[mid:].strip())
-                else:
-                    parts.append(chunk)
-            else:
-                parts.append(chunk)
-        return parts or ["Sin acciones registradas"]
+    # -----------------------
+    # Right card: resumen / criticidad
+    # -----------------------
+    def _coerce_str(value) -> str:
+        if value is None:
+            return "N/D"
+        if isinstance(value, str):
+            txt = value.strip()
+            return txt if txt else "N/D"
+        return str(value)
 
-    def _render_action_badges(ax_target, y_start, label, text_value, color):
-        ax_target.text(0.02, y_start, label, fontsize=11, fontweight="bold", ha="left", va="center")
-        y_pos = y_start - 0.07
-        for part in _wrap_action_text(text_value):
-            wnd._draw_status_tag(ax_target, part, 0.32, y_pos, color=color, text_color="#ffffff")
-            y_pos -= 0.07
-        return y_pos + 0.01
+    def _titlecase_first(value: str) -> str:
+        txt = _coerce_str(value)
+        if txt == "N/D":
+            return txt
+        return txt[:1].upper() + txt[1:]
 
-    def _draw_right_row(ax_target, y_val, label, value, *, color="#0d47a1", text_color="#ffffff"):
-        pretty = value if value and value != "N/D" else "N/D"
-        if isinstance(pretty, str):
-            pretty = pretty.strip()
-            pretty = pretty[0].upper() + pretty[1:] if pretty else "N/D"
-        wnd._register_conclusion_artist(ax_target.text(0.02, y_val, label.upper(), fontsize=10, fontweight="bold", ha="left", va="center"))
-        wnd._register_conclusion_artist(wnd._draw_status_tag(ax_target, pretty, 0.42, y_val, color=color, text_color=text_color))
-        return y_val - 0.08
+    def _short_line(value: str, *, max_chars: int) -> str:
+        txt = " ".join(_coerce_str(value).split())
+        if txt == "N/D":
+            return txt
+        if len(txt) <= max_chars:
+            return txt
+        trimmed = txt[: max(0, max_chars - 1)].rstrip(" .,;:")
+        return f"{trimmed}…"
 
-    header_y = wnd._draw_section_title(right_ax, "Seguimiento y criticidad", y=0.96)
-    # Modo dominante / ubicacion / etapa / severidad / riesgo / lifetime con prioridad al bloque de conclusiones
+    def _wrap_badge(value: str, *, max_chars: int, max_lines: int = 2) -> str:
+        import textwrap
+
+        txt = " ".join(_coerce_str(value).split())
+        if txt == "N/D":
+            return txt
+        lines = textwrap.wrap(txt, width=max_chars, break_long_words=False, break_on_hyphens=False)
+        if not lines:
+            return "N/D"
+        if len(lines) > max_lines:
+            lines = lines[:max_lines]
+            lines[-1] = _short_line(lines[-1], max_chars=max_chars)
+        return "\n".join(lines)
+
+    def _split_lines(value) -> list[str]:
+        if value is None:
+            return []
+        if isinstance(value, list):
+            items = []
+            for item in value:
+                s = _coerce_str(item)
+                if s != "N/D":
+                    items.append(s)
+            return items
+        if isinstance(value, str):
+            raw = value.replace("\r", "\n")
+            parts = []
+            for line in raw.split("\n"):
+                line = line.strip()
+                if not line:
+                    continue
+                parts.extend([p.strip() for p in line.split(".") if p.strip()])
+            return parts
+        return []
+
+    def _draw_right_row(ax_target, y_val, label, value, *, color, badge_x=0.44):
+        badge_txt = _wrap_badge(value, max_chars=32, max_lines=2)
+        wnd._register_conclusion_artist(ax_target.text(0.02, y_val, label.upper(), fontsize=9, fontweight="bold", ha="left", va="center", color="#111827"))
+        wnd._register_conclusion_artist(wnd._draw_status_tag(ax_target, _titlecase_first(badge_txt), badge_x, y_val, color=color, text_color="#ffffff", size=10))
+        n_lines = badge_txt.count("\n") + 1
+        return y_val - (0.070 + 0.032 * (n_lines - 1))
+
+    y_right = _draw_card_section(right_ax, "Seguimiento y criticidad", y=0.97)
+
+    # Prioridad: bloque de conclusiones > rule_pd > summary
     dom_pd = conclusion_block.get("dominant_discharge") or rule_pd.get("class_label") or rule_pd.get("dominant_pd") or summary.get("pd_type") or "N/D"
     location = conclusion_block.get("location_hint") or rule_pd.get("location_hint", "N/D")
     stage = conclusion_block.get("rule_pd_stage") or rule_pd.get("stage", "N/D")
@@ -461,23 +535,18 @@ def render_conclusions(wnd, result: dict, payload: dict | None = None) -> None:
     lifetime_score = conclusion_block.get("lifetime_score") or rule_pd.get("lifetime_score")
     lifetime_band = conclusion_block.get("lifetime_score_band") or rule_pd.get("lifetime_band")
     lifetime_text = conclusion_block.get("lifetime_score_text") or rule_pd.get("lifetime_text")
-    actions_block = conclusion_block.get("actions")
-    if isinstance(actions_block, str):
-        actions_list = [a.strip() for a in actions_block.split(".") if a.strip()]
-    elif isinstance(actions_block, list):
-        actions_list = actions_block
-    else:
-        actions_list = []
-    if not actions_list:
-        fallback_actions = summary.get("actions")
-        if isinstance(fallback_actions, list):
-            actions_list = fallback_actions
-        elif isinstance(fallback_actions, str) and fallback_actions.strip():
-            actions_list = [fallback_actions.strip()]
-        else:
-            actions_list = rule_pd.get("actions") or []
-    explanation = rule_pd.get("explanation") or []
 
+    # Overrides manuales (si están activos)
+    if manual:
+        dom_pd = manual.get("mode") or dom_pd
+        location = manual.get("location") or location
+        stage = manual.get("stage") or stage
+        risk_label = manual.get("risk") or risk_label
+
+    if isinstance(stage, str) and stage.lower().startswith("evoluc"):
+        stage = "Avanzada"
+
+    # Badge resumen (sin categoría, como pidió el usuario)
     risk_key = risk_label.lower() if isinstance(risk_label, str) else ""
     estado_map = {
         "bajo": ("Aceptable", "#00B050"),
@@ -487,102 +556,74 @@ def render_conclusions(wnd, result: dict, payload: dict | None = None) -> None:
         "alta": ("Alta", "#FF8C00"),
         "alto": ("Grave", "#FF8C00"),
         "grave": ("Grave", "#FF8C00"),
-        "critico": ("Critico", "#B00000"),
-        "critica": ("Critico", "#B00000"),
+        "critico": ("Crítico", "#B00000"),
+        "critica": ("Crítico", "#B00000"),
         "incipiente": ("Incipiente", "#00B050"),
         "descargas parciales no detectadas": ("Sin descargas", "#00B050"),
         "sin descargas": ("Sin descargas", "#00B050"),
     }
-    estado_general, risk_color = estado_map.get(risk_key, (risk_label if isinstance(risk_label, str) else "N/D", palette.get(risk_key, "#00B050")))
-    life_score_val = lifetime_score
-    life_txt = f"{life_score_val:.1f}" if isinstance(life_score_val, (int, float)) else "N/D"
+    estado_general, risk_color = estado_map.get(
+        risk_key,
+        (risk_label if isinstance(risk_label, str) else "N/D", palette.get(risk_key, "#00B050")),
+    )
+    life_txt = f"{lifetime_score:.1f}" if isinstance(lifetime_score, (int, float)) else "N/D"
     vida_txt = lifetime_band or "N/D"
     if manual:
         estado_general = manual.get("header_risk") or estado_general
         life_txt = manual.get("header_score") or life_txt
         vida_txt = manual.get("header_life") or vida_txt
         risk_color = manual.get("header_color", risk_color)
-    summary_badge = f"{estado_general}   |   LifeScore: {life_txt}   |   Vida remanente: {vida_txt}"
-    y_right = header_y - 0.03
-    wnd._draw_status_tag(right_ax, summary_badge, 0.02, y_right, color=risk_color, text_color="#ffffff", size=12)
-    y_right -= 0.12
+    summary_badge = f"{estado_general}  |  LifeScore: {life_txt}  |  Vida remanente: {vida_txt}"
+    summary_badge = _wrap_badge(summary_badge, max_chars=48, max_lines=2)
 
-    # Fila de modo, ubicacion, etapa, severidad
-    y_right = _draw_right_row(right_ax, y_right, "MODO DOMINANTE", dom_pd, color="#1e88e5", text_color="#ffffff")
-    y_right = _draw_right_row(right_ax, y_right, "UBICACION PROBABLE", location, color="#1e88e5", text_color="#ffffff")
-    y_right = _draw_right_row(right_ax, y_right, "ETAPA", stage, color="#1e88e5", text_color="#ffffff")
-    sev_text = f"{sev_level} (Indice {sev_idx:.1f}/10)" if sev_idx is not None else sev_level
-    y_right = _draw_right_row(right_ax, y_right, "SEVERIDAD", sev_text, color="#1e88e5", text_color="#ffffff")
+    y_cursor = y_right - 0.02
+    wnd._register_conclusion_artist(wnd._draw_status_tag(right_ax, summary_badge, 0.02, y_cursor, color=risk_color, text_color="#ffffff", size=10))
+    y_cursor -= 0.11 if "\n" not in summary_badge else 0.15
 
-    # Resumen LifeTime
+    # Filas con categoría + badge (alineadas)
+    y_cursor = _draw_right_row(right_ax, y_cursor, "Modo dominante", dom_pd, color=(manual.get("mode_color", "#1e88e5") if manual else "#1e88e5"))
+    y_cursor = _draw_right_row(right_ax, y_cursor, "Ubicación probable", location, color=(manual.get("location_color", "#1e88e5") if manual else "#1e88e5"))
+    y_cursor = _draw_right_row(right_ax, y_cursor, "Etapa", stage, color=(manual.get("stage_color", "#1e88e5") if manual else "#1e88e5"))
+    sev_text = f"{sev_level} (Índice {sev_idx:.1f}/10)" if sev_idx is not None else sev_level
+    y_cursor = _draw_right_row(right_ax, y_cursor, "Severidad", sev_text, color="#1e88e5")
+
+    # LifeTime (badge + texto corto)
     if lifetime_score is not None:
         lt_line = f"LifeTime score: {lifetime_score}/100"
         if lifetime_band:
             lt_line += f" ({lifetime_band})"
-        wnd._draw_status_tag(right_ax, lt_line, 0.02, y_right, color="#0d47a1", text_color="#ffffff")
-        y_right -= 0.06
+        lt_line = _wrap_badge(lt_line, max_chars=44, max_lines=2)
+        wnd._register_conclusion_artist(wnd._draw_status_tag(right_ax, lt_line, 0.02, y_cursor, color="#0d47a1", text_color="#ffffff", size=10))
+        y_cursor -= 0.08 if "\n" not in lt_line else 0.12
         if lifetime_text:
-            wnd._register_conclusion_artist(right_ax.text(0.02, y_right - 0.04, lifetime_text, fontsize=9, ha="left", wrap=True))
-            y_right -= 0.12
+            wnd._register_conclusion_artist(right_ax.text(0.02, y_cursor, _short_line(lifetime_text, max_chars=72), fontsize=9, ha="left", va="top", color="#111827", wrap=True))
+            y_cursor -= 0.06
 
-    # Acciones recomendadas (una sola seccion ordenada)
-    if actions_list:
-        y_right = wnd._draw_section_title(right_ax, "Acciones recomendadas", y=y_right - 0.015)
-        y_act = y_right - 0.035
-        for act in actions_list[:4]:
-            right_ax.text(0.03, y_act, f"• {act}", fontsize=9, ha="left")
-            y_act -= 0.06
-        y_right = y_act - 0.02
+    # Acciones recomendadas + resumen de reglas (compacto)
+    actions_block = conclusion_block.get("actions")
+    actions_list = _split_lines(manual.get("action_reco") if manual else None) or _split_lines(actions_block)
+    if not actions_list:
+        actions_list = _split_lines(summary.get("actions")) or _split_lines(rule_pd.get("actions"))
+    gap_action = _split_lines(manual.get("action_gap") if manual else None) or _split_lines((gap_info or {}).get("action") if isinstance(gap_info, dict) else None)
+    if gap_action:
+        gap_first = _short_line(gap_action[0], max_chars=60)
+        actions_list = actions_list + [f"Gap-time P50: {gap_first}"]
 
-    # Explicacion resumida
-    if explanation:
-        y_right = wnd._draw_section_title(right_ax, "Resumen de reglas", y=y_right - 0.015)
-        y_exp = y_right - 0.035
-        for line in explanation[:3]:
-            right_ax.text(0.03, y_exp, f"- {line}", fontsize=9, ha="left", wrap=True)
-            y_exp -= 0.05
-        y_right = y_exp - 0.015
+    actions_list = [_short_line(a, max_chars=64) for a in actions_list if a][:4]
+    if actions_list and y_cursor > 0.22:
+        y_cursor = _draw_card_section(right_ax, "Acciones recomendadas", y=y_cursor, size=11)
+        for act in actions_list:
+            wnd._register_conclusion_artist(right_ax.text(0.03, y_cursor, f"• {act}", fontsize=9, ha="left", va="top", color="#111827", wrap=True))
+            y_cursor -= 0.055
+        y_cursor -= 0.02
 
-    # Indicadores avanzados (skew/kurt/corr/medianas)
-    y_right = wnd._draw_section_title(right_ax, "Indicadores avanzados", y=y_right - 0.015)
-    adv_rows = [
-        ("Skewness +/-", f"{_fmt_value(skew_pos, decimals=2)} / {_fmt_value(skew_neg, decimals=2)}"),
-        ("Kurtosis +/-", f"{_fmt_value(kurt_pos, decimals=2)} / {_fmt_value(kurt_neg, decimals=2)}"),
-        ("Correlacion fases", _fmt_value(corr_phase, decimals=2)),
-        ("Mediana fase +/-", f"{_fmt_angle(med_pos)} / {_fmt_angle(med_neg)}"),
-    ]
-    for label, val in adv_rows:
-        y_right = _draw_right_row(right_ax, y_right, label, val, color="#4b5563", text_color="#ffffff")
-
-    if gap_info:
-        gap_text = manual.get("action_gap") if manual else None
-        gap_color = manual.get("action_gap_color", gap_info.get("color", "#00B050")) if manual else gap_info.get("color", "#00B050")
-        if not gap_text:
-            gap_text = gap_info.get("action", "")
-        y_right = _render_action_badges(right_ax, y_right, "ACCION GAP-TIME P50", gap_text, gap_color) - 0.06
-
-    rule_pd = result.get("rule_pd", {}) if isinstance(result, dict) else {}
-    stage_alt = (manual.get("stage") if manual else None) or rule_pd.get("stage") or summary.get("stage", "N/D")
-    pd_type_alt = (manual.get("mode") if manual else None) or rule_pd.get("class_label") or summary.get("pd_type", "N/D")
-    location_alt = (manual.get("location") if manual else None) or rule_pd.get("location_hint") or summary.get("location", "N/D")
-    risk_manual_text = (manual.get("risk") if manual else None) or rule_pd.get("risk_level")
-
-    ann_probs = wnd._last_ann_probs or {}
-    if ann_probs:
-        try:
-            ann_norm = {str(k).lower(): float(v) for k, v in ann_probs.items() if v is not None}
-            dom_key = max(ann_norm, key=ann_norm.get)
-            if dom_key in CLASS_INFO:
-                pd_type_alt = CLASS_INFO[dom_key].get("name", pd_type_alt)
-        except Exception:
-            pass
-    if isinstance(stage_alt, str) and stage_alt.lower().startswith("evoluc"):
-        stage_alt = "Avanzada"
-
-    y_right = _draw_right_row(right_ax, y_right, "ETAPA PROBABLE", stage_alt, color=manual.get("stage_color", "#1e88e5") if manual else "#1e88e5")
-    y_right = _draw_right_row(right_ax, y_right, "MODO DOMINANTE", pd_type_alt, color=manual.get("mode_color", "#1e88e5") if manual else "#1e88e5")
-    y_right = _draw_right_row(right_ax, y_right, "UBICACION PROBABLE", location_alt, color=manual.get("location_color", "#1e88e5") if manual else "#1e88e5")
-    _draw_right_row(right_ax, y_right, "RIESGO", risk_manual_text or risk_label, color=manual.get("risk_color", risk_color) if manual else risk_color)
+    explanation_lines = _split_lines(rule_pd.get("explanation"))
+    explanation_lines = [_short_line(e, max_chars=68) for e in explanation_lines if e][:3]
+    if explanation_lines and y_cursor > 0.14:
+        y_cursor = _draw_card_section(right_ax, "Resumen de reglas", y=y_cursor, size=11)
+        for line in explanation_lines:
+            wnd._register_conclusion_artist(right_ax.text(0.03, y_cursor, f"- {line}", fontsize=8.8, ha="left", va="top", color="#111827", wrap=True))
+            y_cursor -= 0.05
 
 
 

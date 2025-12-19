@@ -65,12 +65,27 @@ def compute_hist_kpis(hist: Dict[str, np.ndarray]) -> Dict[str, float | int]:
     h_ph_neg = np.asarray(hist.get("H_ph_neg", []), dtype=float)
 
     def _safe_corr(a: np.ndarray, b: np.ndarray) -> float:
+        a = np.asarray(a, dtype=float)
+        b = np.asarray(b, dtype=float)
+        if a.size == 0 or b.size == 0 or a.size != b.size:
+            return np.nan
+        mask = np.isfinite(a) & np.isfinite(b)
+        if mask.sum() < 2:
+            return np.nan
+        a = a[mask]
+        b = b[mask]
+        if a.size < 2:
+            return np.nan
+        a_center = a - np.mean(a)
+        b_center = b - np.mean(b)
+        a_std = np.std(a_center)
+        b_std = np.std(b_center)
+        if a_std == 0 or b_std == 0:
+            return np.nan
         try:
-            if a.size and b.size and a.size == b.size:
-                return float(np.corrcoef(a, b)[0, 1])
+            return float(np.mean(a_center * b_center) / (a_std * b_std))
         except Exception:
-            pass
-        return np.nan
+            return np.nan
 
     def _safe_ratio(a: float, b: float) -> float | float:
         try:

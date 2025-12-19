@@ -65,6 +65,30 @@ def _count_peaks_1d(arr: np.ndarray) -> int:
     return count
 
 
+def _safe_corr(a: np.ndarray, b: np.ndarray) -> float:
+    a = np.asarray(a, dtype=float)
+    b = np.asarray(b, dtype=float)
+    if a.size == 0 or b.size == 0 or a.size != b.size:
+        return np.nan
+    mask = np.isfinite(a) & np.isfinite(b)
+    if mask.sum() < 2:
+        return np.nan
+    a = a[mask]
+    b = b[mask]
+    if a.size < 2:
+        return np.nan
+    a_center = a - np.mean(a)
+    b_center = b - np.mean(b)
+    a_std = np.std(a_center)
+    b_std = np.std(b_center)
+    if a_std == 0 or b_std == 0:
+        return np.nan
+    try:
+        return float(np.mean(a_center * b_center) / (a_std * b_std))
+    except Exception:
+        return np.nan
+
+
 def compute_advanced_metrics(result: dict, bins_amp: int = 32, bins_phase: int = 32) -> dict:
     """KPIs avanzados (ANGPD 2.0 + histogramas)."""
     aligned = result.get("aligned", {}) if isinstance(result, dict) else {}
@@ -160,10 +184,7 @@ def compute_advanced_metrics(result: dict, bins_amp: int = 32, bins_phase: int =
     if neg_curve.size:
         peaks_neg = _count_peaks_1d(neg_curve)
     if pos_curve.size and neg_curve.size and pos_curve.size == neg_curve.size:
-        try:
-            phase_corr = float(np.corrcoef(pos_curve, neg_curve)[0, 1])
-        except Exception:
-            phase_corr = np.nan
+        phase_corr = _safe_corr(pos_curve, neg_curve)
 
     hist_block = {
         "phi_centers": phi_curve.tolist() if phi_curve.size else [],

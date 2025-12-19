@@ -22,6 +22,8 @@ def build_top_bar(wnd):
     wnd.btn_open = QPushButton("Abrir PRPD...")
     wnd.btn_run = QPushButton("Procesar")
     wnd.btn_pdf = QPushButton("Exportar PDF")
+    wnd.btn_dash3d = QPushButton("3D")
+    wnd.btn_dash3d.setToolTip("Abre el visor Dash 3D con el XML cargado.")
     wnd.btn_load_ann = QPushButton("Cargar ANN")
     wnd.btn_batch = QPushButton("Procesar carpeta")
     wnd.btn_help = QPushButton("Ayuda/README")
@@ -107,6 +109,7 @@ def build_top_bar(wnd):
 
     row1.addWidget(wnd.btn_open)
     row1.addWidget(wnd.btn_run)
+    row1.addWidget(wnd.btn_dash3d)
     row1.addWidget(wnd.btn_pdf)
     row1.addWidget(wnd.btn_load_ann)
     row1.addWidget(wnd.btn_gap_ext_add)
@@ -168,6 +171,12 @@ def build_bottom_area(wnd):
     sub.addStretch(1)
     wnd.btn_export_all = QPushButton("Exportar todo los resultados")
     sub.addWidget(wnd.btn_export_all)
+    wnd.btn_clear_cache = QPushButton("Limpiar caché")
+    sub.addWidget(wnd.btn_clear_cache)
+    wnd.lbl_warning = QLabel("")
+    wnd.lbl_warning.setStyleSheet("color: #b00020; font-weight: bold;")
+    wnd.lbl_warning.setVisible(False)
+    sub.addWidget(wnd.lbl_warning)
 
     batch_bar = QHBoxLayout()
     wnd.banner_max_height = 150
@@ -185,6 +194,8 @@ def build_bottom_area(wnd):
 
 def build_figures(wnd):
     """Crea la figura principal y ejes; retorna (fig, canvas)."""
+    # Usar layout manual consistente para que todos los cuadrantes
+    # compartan el mismo tamaño, independientemente de colorbars/ejes twin.
     fig = Figure(figsize=(10, 6), dpi=100, constrained_layout=False)
     canvas = FigureCanvas(fig)
     wnd._gs_main = fig.add_gridspec(2, 2, height_ratios=[1, 1])
@@ -231,7 +242,8 @@ def build_resolution_button(wnd):
         ("1920x1080 — 1/4 (960x540)", (960, 540)),
         ("5120x1440 — completo", (5120, 1440)),
         ("5120x1440 — 1/2 ancho", (2560, 1440)),
-        ("5120x1440 — 1/4 (1280x720)", (1280, 720)),
+        # 1280x720/780 quedaba justo y en algunos setups recortaba ejes (X y 0 en Y)
+        ("5120x1440 — 1/4 (1280x900)", (1280, 900)),
     ]
     for label, size in presets:
         act = menu.addAction(label)

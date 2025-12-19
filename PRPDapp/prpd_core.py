@@ -781,7 +781,11 @@ def _normalize_deciles_keep(values) -> list[int] | None:
 
 
 def _compute_pixel_deciles(mag_vals) -> tuple[np.ndarray | None, dict]:
-    """Calcula deciles de magnitud (D1 = menor amplitud, D10 = mayor)."""
+    """Calcula deciles de magnitud (D1 = menor amplitud, D10 = mayor).
+
+    Usar equal-frequency (por percentiles) evita que un outlier en min/max haga que
+    un filtro tipo "D2-D10" recorte mucho más de lo esperado.
+    """
     meta = {"available": False}
     if mag_vals is None:
         return None, meta
@@ -789,23 +793,13 @@ def _compute_pixel_deciles(mag_vals) -> tuple[np.ndarray | None, dict]:
     if arr.size == 0 or not np.isfinite(arr).any():
         return None, meta
     arr = np.clip(arr, 0.0, 100.0)
-    min_val = float(np.nanmin(arr))
-    max_val = float(np.nanmax(arr))
-    span = max(max_val - min_val, 1e-12)
-    scaled = np.full_like(arr, fill_value=np.nan, dtype=float)
     finite = np.isfinite(arr)
-    scaled[finite] = ((arr[finite] - min_val) / span) * 100.0
-    scaled = np.clip(scaled, 0.0, 100.0)
-    deciles = np.zeros_like(scaled, dtype=int)
-    idx = np.floor(scaled[finite] / 10.0)
-    idx = np.clip(idx, 0, 9)
-    deciles[finite] = (idx + 1).astype(int)
-    edges = np.linspace(min_val, max_val, 11)
+    deciles, edges = _ef_group_index(arr, n_groups=10)
     meta = {
         "available": True,
-        "min_raw": min_val,
-        "max_raw": max_val,
-        "edges": [float(x) for x in edges],
+        "min_raw": float(np.nanmin(arr[finite])) if finite.any() else float("nan"),
+        "max_raw": float(np.nanmax(arr[finite])) if finite.any() else float("nan"),
+        "edges": [float(x) for x in (edges.tolist() if hasattr(edges, "tolist") else list(edges))],
     }
     return deciles, meta
 
@@ -883,33 +877,13 @@ def process_prpd(path: Path, out_root: Path, force_phase_offsets=None, fast_mode
     pixel_dec_all, pixel_meta = _compute_pixel_deciles(amp_for_deciles)
     n0 = amp0.size
     gate_mask = np.ones(n0, dtype=bool)
-    if mask_ranges:
-        try:
-            mask_bool = _phase_mask_bool(ph_al, mask_ranges)
-            if mask_bool.shape == gate_mask.shape:
-                gate_mask &= mask_bool
-            else:
-                gate_mask &= mask_bool.astype(bool)
-        except Exception:
-            pass
-    if qty_deciles_selected is not None:
-        if len(qty_deciles_selected) == 0:
-            gate_mask[:] = False
-        elif qty_dec_all is not None and qty_dec_all.size == gate_mask.size:
-            try:
-                q_mask = np.isin(qty_dec_all, qty_deciles_selected)
-                gate_mask &= q_mask
-            except Exception:
-                pass
-    if pixel_deciles_selected is not None:
-        if len(pixel_deciles_selected) == 0:
-            gate_mask[:] = False
-        elif pixel_dec_all is not None and pixel_dec_all.size == gate_mask.size:
-            try:
-                dec_mask = np.isin(pixel_dec_all, pixel_deciles_selected)
-                gate_mask &= dec_mask
-            except Exception:
-                pass
+    # NOTA: la máscara de fase se aplica como "view mask" al final (sobre los puntos ya
+    # alineados/filtrados), para no distorsionar el clustering/denoising.
+    # Si el usuario vacía deciles (pixel o quantity), no hay nada que procesar.
+    if (qty_deciles_selected is not None and len(qty_deciles_selected) == 0) or (
+        pixel_deciles_selected is not None and len(pixel_deciles_selected) == 0
+    ):
+        gate_mask[:] = False
     ph_g = ph_al[gate_mask]
     amp_g = amp0[gate_mask]
     qty_quint_g = None
@@ -919,6 +893,9 @@ def process_prpd(path: Path, out_root: Path, force_phase_offsets=None, fast_mode
     qty_dec_g = None
     if qty_dec_all is not None and qty_dec_all.size == gate_mask.size:
         qty_dec_g = qty_dec_all[gate_mask]
+    pixel_dec_g = None
+    if pixel_dec_all is not None and pixel_dec_all.size == gate_mask.size:
+        pixel_dec_g = pixel_dec_all[gate_mask]
     pixel_g = None
     if pixel0 is not None:
         pixel_g = pixel0[gate_mask]
@@ -956,22 +933,29 @@ def process_prpd(path: Path, out_root: Path, force_phase_offsets=None, fast_mode
     else:
         labels = np.zeros(0, dtype=int)
         keep = np.zeros(0, dtype=bool)
-    if mask_ranges and ph_g.size and keep.size:
+    # Aplicar máscaras/filtros solo como recorte final (post-clustering) para no distorsionar
+    # el denoising/clustering (y evitar que "Pixel" corte el patrón por fase).
+    final_keep = keep.copy() if keep.size else keep
+    if final_keep.size:
         try:
-            inside = _phase_mask_bool(ph_g, mask_ranges)
-            if inside.shape == keep.shape:
-                keep = keep & inside
-            else:
-                keep = keep & inside.astype(bool)
+            view = np.ones(final_keep.shape, dtype=bool)
+            if mask_ranges:
+                view &= _phase_mask_bool(ph_g, mask_ranges)
+            if pixel_deciles_selected is not None and pixel_dec_g is not None and pixel_dec_g.size == view.size:
+                view &= np.isin(pixel_dec_g, pixel_deciles_selected)
+            if qty_deciles_selected is not None and qty_dec_g is not None and qty_dec_g.size == view.size:
+                view &= np.isin(qty_dec_g, qty_deciles_selected)
+            final_keep &= view
         except Exception:
             pass
-    # features
-    feats = compute_features(ph_g, amp_g, amp_norm_g, labels, keep)
+
+    # features (coherentes con el recorte final)
+    feats = compute_features(ph_g, amp_g, amp_norm_g, labels, final_keep)
     cls, probs = heuristic_class(feats)
     sev, sev_bd = severity_with_breakdown(feats)
 
     # recolecta datos alineados/filtrados (+ etiquetas)
-    kept_idx = keep & (labels>=0)
+    kept_idx = final_keep & (labels>=0)
     aligned = {"phase_deg": ph_g[kept_idx], "amplitude": amp_g[kept_idx]}
     if qty_g is not None:
         aligned["quantity"] = qty_g[kept_idx]  # S5 hereda quantity para todos los histogramas
@@ -982,6 +966,8 @@ def process_prpd(path: Path, out_root: Path, force_phase_offsets=None, fast_mode
     if pixel_g is not None:
         aligned["pixel"] = pixel_g[kept_idx]
     labels_aligned = labels[kept_idx]
+
+    # Recorte final (fase/pixel/qty) ya aplicado vía final_keep.
     raw = {"phase_deg": data["phase_deg"], "amplitude": data["amplitude"]}
     if qty0 is not None:
         raw["quantity"] = np.asarray(qty0, dtype=float)
@@ -1056,7 +1042,7 @@ def process_prpd(path: Path, out_root: Path, force_phase_offsets=None, fast_mode
         "raw": raw,
         "aligned": aligned,
         "labels": labels,                 # etiquetas DBSCAN para todos los puntos (incl. ruido)
-        "keep_mask": keep,                # mã‚±scara de puntos conservados en pruning
+        "keep_mask": final_keep,          # máscara final (pruning + filtros de vista)
         "labels_aligned": labels_aligned, # etiquetas sÐ˜lo para puntos alineados/filtrados (>=0)
         "phase_offset": off,
         "phase_vector_R": R,
