@@ -4676,14 +4676,26 @@ class PRPDWindow(QMainWindow):
             return
         try:
             current_profile = self._collect_current_profile()
-            if not self.last_run_profile or self.last_run_profile != current_profile:
-                QMessageBox.warning(
-                    self,
-                    "Exportar",
-                    "Los parámetros actuales no coinciden con el último procesamiento.\n"
-                    "Pulsa 'Procesar' antes de exportar para garantizar coherencia.",
-                )
-                return
+            if self.last_run_profile and self.last_run_profile != current_profile:
+                diff_keys = {
+                    k
+                    for k in current_profile.keys()
+                    if current_profile.get(k) != self.last_run_profile.get(k)
+                }
+                view_only = diff_keys.issubset({"pixel", "qty", "qty_quints"})
+                if view_only:
+                    try:
+                        self._refresh_last_result_filters()
+                    except Exception:
+                        pass
+                else:
+                    QMessageBox.warning(
+                        self,
+                        "Exportar",
+                        "Los parametros actuales no coinciden con el ultimo procesamiento.\n"
+                        "Pulsa 'Procesar' antes de exportar para garantizar coherencia.",
+                    )
+                    return
             outdir = self._get_output_dir()
             profile_tag = self._build_profile_tag(current_profile)
             session_dir = self._create_session_dir(outdir, profile_tag)
@@ -5223,7 +5235,19 @@ class PRPDWindow(QMainWindow):
                     "angpd": angpd_kpis,
                 }
                 json_path = session_dir / f"{stem}_conclusiones_{suffix}.json"
-                json_path.write_text(json.dumps(enriched, ensure_ascii=False, indent=2), encoding="utf-8")
+                def _json_default(obj):
+                    if isinstance(obj, np.ndarray):
+                        return obj.tolist()
+                    if isinstance(obj, (np.integer, np.floating)):
+                        return obj.item()
+                    if isinstance(obj, (np.bool_,)):
+                        return bool(obj)
+                    return str(obj)
+
+                json_path.write_text(
+                    json.dumps(enriched, ensure_ascii=False, indent=2, default=_json_default),
+                    encoding="utf-8",
+                )
                 # Markdown sencillo con conclusiones
                 def _map_stage(stage: str) -> str:
                     mapping = {
