@@ -524,6 +524,24 @@ def render_conclusions(wnd, result: dict, payload: dict | None = None) -> None:
             lines[-1] = _short_line(lines[-1], max_chars=max_chars)
         return "\n".join(lines)
 
+    def _extract_life_hint(text: str) -> str:
+        import re
+
+        txt = " ".join(_coerce_str(text).split())
+        if txt == "N/D":
+            return txt
+        txt_norm = txt.lower().replace("ñ", "n")
+        m = re.search(r"(\d+\s*-\s*\d+|\d+)\s*(anos|ano|meses|mes)", txt_norm)
+        if m:
+            span = m.group(1).replace(" ", "")
+            unit = m.group(2)
+            return f"{span} {unit}"
+        if "ano" in txt_norm:
+            return "anos"
+        if "mes" in txt_norm:
+            return "meses"
+        return txt
+
     def _split_lines(value) -> list[str]:
         if value is None:
             return []
@@ -551,6 +569,25 @@ def render_conclusions(wnd, result: dict, payload: dict | None = None) -> None:
         wnd._register_conclusion_artist(wnd._draw_status_tag(ax_target, _titlecase_first(badge_txt), badge_x, y_val, color=color, text_color="#ffffff", size=10))
         n_lines = badge_txt.count("\n") + 1
         return y_val - (0.070 + 0.032 * (n_lines - 1))
+
+    def _draw_action_chip(ax_target, y_val, text, idx):
+        wrapped = _wrap_badge(text, max_chars=64, max_lines=3)
+        label = f"{idx:02d}. {wrapped}"
+        wnd._register_conclusion_artist(
+            ax_target.text(
+                0.03,
+                y_val,
+                label,
+                fontsize=9.2,
+                ha="left",
+                va="top",
+                color="#0f172a",
+                wrap=True,
+                bbox=dict(boxstyle="round,pad=0.28", facecolor="#eef2ff", edgecolor="#c7d2fe"),
+            )
+        )
+        n_lines = wrapped.count("\n") + 1
+        return y_val - (0.060 + 0.030 * (n_lines - 1))
 
     y_right = _draw_card_section(right_ax, "Seguimiento y criticidad", y=0.97)
 
@@ -599,6 +636,8 @@ def render_conclusions(wnd, result: dict, payload: dict | None = None) -> None:
     )
     life_txt = f"{lifetime_score:.1f}" if isinstance(lifetime_score, (int, float)) else "N/D"
     vida_txt = lifetime_band or "N/D"
+    if isinstance(vida_txt, str) and "%" in vida_txt and lifetime_text:
+        vida_txt = _extract_life_hint(lifetime_text)
     if manual:
         estado_general = manual.get("header_risk") or estado_general
         life_txt = manual.get("header_score") or life_txt
@@ -618,17 +657,19 @@ def render_conclusions(wnd, result: dict, payload: dict | None = None) -> None:
     sev_text = f"{sev_level} (Índice {sev_idx:.1f}/10)" if sev_idx is not None else sev_level
     y_cursor = _draw_right_row(right_ax, y_cursor, "Severidad", sev_text, color="#1e88e5")
 
-    # LifeTime (badge + texto corto)
-    if lifetime_score is not None:
-        lt_line = f"LifeTime score: {lifetime_score}/100"
-        if lifetime_band:
-            lt_line += f" ({lifetime_band})"
-        lt_line = _wrap_badge(lt_line, max_chars=44, max_lines=2)
-        wnd._register_conclusion_artist(wnd._draw_status_tag(right_ax, lt_line, 0.02, y_cursor, color="#0d47a1", text_color="#ffffff", size=10))
-        y_cursor -= 0.08 if "\n" not in lt_line else 0.12
-        if lifetime_text:
-            wnd._register_conclusion_artist(right_ax.text(0.02, y_cursor, _short_line(lifetime_text, max_chars=72), fontsize=9, ha="left", va="top", color="#111827", wrap=True))
-            y_cursor -= 0.06
+    p5_label, p5_color = _gap_badge_tuple(gap_p5, class_p5, default="Sin dato")
+    p5_value = _fmt_value(gap_p5, decimals=2, suffix=" ms")
+    if p5_value != "N/D":
+        p5_text = f"{p5_label} ({p5_value})"
+    else:
+        p5_text = p5_label
+    y_cursor = _draw_right_row(right_ax, y_cursor, "Cola critica (P5)", p5_text, color=p5_color)
+
+    if lifetime_text and y_cursor > 0.32:
+        lt_hint = _wrap_badge(lifetime_text, max_chars=70, max_lines=3)
+        wnd._register_conclusion_artist(right_ax.text(0.02, y_cursor, lt_hint, fontsize=9, ha="left", va="top", color="#111827", wrap=True))
+        y_cursor -= 0.06 + 0.03 * (lt_hint.count("\n"))
+
 
     # Acciones recomendadas + resumen de reglas (compacto)
     actions_block = conclusion_block.get("actions")
@@ -637,35 +678,41 @@ def render_conclusions(wnd, result: dict, payload: dict | None = None) -> None:
         actions_list = _split_lines(summary.get("actions")) or _split_lines(rule_pd.get("actions"))
     gap_action = _split_lines(manual.get("action_gap") if manual else None) or _split_lines((gap_info or {}).get("action") if isinstance(gap_info, dict) else None)
     if gap_action:
-        gap_first = _short_line(gap_action[0], max_chars=60)
-        actions_list = actions_list + [f"Gap-time P50: {gap_first}"]
+        actions_list = actions_list + [f"Gap-time P50: {gap_action[0]}"]
 
-    actions_list = [_short_line(a, max_chars=64) for a in actions_list if a][:4]
+    actions_list = [a for a in actions_list if a][:4]
     if actions_list and y_cursor > 0.22:
         y_cursor = _draw_card_section(right_ax, "Acciones recomendadas", y=y_cursor, size=11)
-        for act in actions_list:
-            wnd._register_conclusion_artist(right_ax.text(0.03, y_cursor, f"• {act}", fontsize=9, ha="left", va="top", color="#111827", wrap=True))
-            y_cursor -= 0.055
+        for idx, act in enumerate(actions_list, 1):
+            y_cursor = _draw_action_chip(right_ax, y_cursor, act, idx)
         y_cursor -= 0.02
 
     explanation_lines = _split_lines(rule_pd.get("explanation"))
-    explanation_lines = [_short_line(e, max_chars=68) for e in explanation_lines if e][:3]
+    explanation_lines = [e for e in explanation_lines if e][:3]
     if explanation_lines and y_cursor > 0.14:
         y_cursor = _draw_card_section(right_ax, "Resumen de reglas", y=y_cursor, size=11)
         for line in explanation_lines:
-            wnd._register_conclusion_artist(right_ax.text(0.03, y_cursor, f"- {line}", fontsize=8.8, ha="left", va="top", color="#111827", wrap=True))
-            y_cursor -= 0.05
+            wrapped = _wrap_badge(line, max_chars=72, max_lines=2)
+            wnd._register_conclusion_artist(right_ax.text(0.03, y_cursor, f"- {wrapped}", fontsize=8.8, ha="left", va="top", color="#111827", wrap=True))
+            y_cursor -= 0.05 + 0.02 * (wrapped.count("\n"))
 
 
 
 def render_ann_gap_view(wnd, result: dict, payload: dict | None = None) -> None:
     """Vista combinada ANN + Gap-time (cuatro paneles)."""
+    try:
+        wnd._restore_standard_axes()
+    except Exception:
+        pass
     if payload is None:
         _, payload = wnd._get_conclusion_insight(result)
     summary = payload.get("summary", {}) if isinstance(payload, dict) else {}
-    gap_stats = payload.get("gap") if isinstance(payload, dict) else None
-    if not gap_stats:
-        gap_stats = result.get("gap_stats")
+    gap_stats_total = payload.get("gap") if isinstance(payload, dict) else None
+    gap_stats_raw = payload.get("gap_raw") if isinstance(payload, dict) else None
+    if not gap_stats_total:
+        gap_stats_total = result.get("gap_stats")
+    if not gap_stats_raw:
+        gap_stats_raw = gap_stats_total or result.get("gap_stats")
     metrics = payload.get("metrics", {}) if isinstance(payload, dict) else {}
     metrics_adv = payload.get("metrics_advanced", {}) if isinstance(payload, dict) else {}
     if not metrics_adv:
@@ -678,21 +725,21 @@ def render_ann_gap_view(wnd, result: dict, payload: dict | None = None) -> None:
 
     wnd.ax_filtered.set_visible(True)
     wnd.ax_filtered.set_axis_on()
-    wnd._draw_gap_chart(wnd.ax_filtered, gap_stats)
+    wnd._draw_gap_chart(wnd.ax_filtered, gap_stats_raw)
 
     wnd.ax_probs.clear()
     wnd.ax_probs.set_facecolor("#fffdf5")
     wnd.ax_probs.set_xticks([])
     wnd.ax_probs.set_yticks([])
     wnd.ax_probs.axis("off")
-    wnd._draw_gap_summary_split(wnd.ax_probs, metrics, gap_stats, side="p50")
+    wnd._draw_gap_summary_split(wnd.ax_probs, metrics, gap_stats_total, side="p50")
 
     wnd.ax_text.clear()
     wnd.ax_text.set_facecolor("#fffdf5")
     wnd.ax_text.set_xticks([])
     wnd.ax_text.set_yticks([])
     wnd.ax_text.axis("off")
-    wnd._draw_gap_summary_split(wnd.ax_text, metrics, gap_stats, side="p5")
+    wnd._draw_gap_summary_split(wnd.ax_text, metrics, gap_stats_total, side="p5")
 
 
 def render_gap_time_full(wnd, result: dict, payload: dict | None = None) -> None:
@@ -700,14 +747,17 @@ def render_gap_time_full(wnd, result: dict, payload: dict | None = None) -> None
     if payload is None:
         _, payload = wnd._get_conclusion_insight(result)
     metrics = payload.get("metrics", {}) if isinstance(payload, dict) else {}
-    gap_stats = payload.get("gap") if isinstance(payload, dict) else None
-    if not gap_stats:
-        gap_stats = result.get("gap_stats")
+    gap_stats_total = payload.get("gap") if isinstance(payload, dict) else None
+    gap_stats_raw = payload.get("gap_raw") if isinstance(payload, dict) else None
+    if not gap_stats_total:
+        gap_stats_total = result.get("gap_stats")
+    if not gap_stats_raw:
+        gap_stats_raw = gap_stats_total or result.get("gap_stats")
 
     wnd.ax_raw.set_visible(False)
     wnd.ax_filtered.set_visible(False)
     wnd.ax_gap_wide.set_visible(True)
-    wnd._draw_gap_chart(wnd.ax_gap_wide, gap_stats)
+    wnd._draw_gap_chart(wnd.ax_gap_wide, gap_stats_raw)
 
     wnd.ax_probs.set_visible(True)
     wnd.ax_probs.clear()

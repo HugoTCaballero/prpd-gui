@@ -176,7 +176,7 @@ def build_bottom_area(wnd):
     wnd.chk_banner_dark.setToolTip("Alterna el banner inferior a la versión oscura (phaseflux_dark_mode.png).")
     sub.addWidget(wnd.chk_banner_dark)
     wnd.chk_ann_hide_sr = QCheckBox("Ocultar S/R (ANN)")
-    wnd.chk_ann_hide_sr.setToolTip("Solo afecta la vista ANN: oculta Suspendida/Ruido del display y renormaliza probabilidades.")
+    wnd.chk_ann_hide_sr.setToolTip("Solo afecta la vista ANN: oculta clases no usadas del display y renormaliza probabilidades.")
     sub.addWidget(wnd.chk_ann_hide_sr)
     sub.addStretch(1)
     wnd.btn_export_all = QPushButton("Exportar todo los resultados")

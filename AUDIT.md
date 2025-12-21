@@ -1,12 +1,40 @@
 # Auditoría rápida — ANN / KPI / Conclusiones (2025-12-19)
 
-## 1) ¿De dónde vienen los KPIs de **Conclusiones**?
+## 0) Cambio clave: pipeline unico (compute_all) + ANN 4 clases + layout alineado
 
-- `PRPDapp/main.py::_get_conclusion_insight` calcula:
-  - KPIs base desde `PRPDapp/logic.py::compute_pd_metrics` → `payload["metrics"]` y `result["metrics"]`.
-  - KPIs avanzados (skew/kurt/medianas/corr/peaks + histogram blocks) desde `PRPDapp/metrics/advanced_kpi.py::compute_advanced_metrics` → `payload["metrics_advanced"]` y `result["metrics_advanced"]`.
-  - Bloque de conclusiones desde `PRPDapp/conclusion_rules.py::build_conclusion_block`.
+- Fuente unica de verdad: `PRPDapp/pipeline.py:23` centraliza `compute_all` y reemplaza computos en vistas; GUI orquesta en `PRPDapp/main.py:2256`.
+- KPI avanzados con mini-hist ampliado y layout mas limpio: `PRPDapp/main.py:3110`.
+- Acciones en Conclusiones con chips y mejor legibilidad: `PRPDapp/ui_render.py:560` + `PRPDapp/main.py:4950`.
+- Exportar todo incluye KPI avanzados, FA profile, ANGPD avanzado y ANN+Gap: `PRPDapp/main.py:4770`.
+- PDF export actualizado a informe multipagina con Nubes y KPI avanzados: `PRPDapp/report.py:1`.
+- Ayuda/README abre PDF y README PDF regenerado desde ayuda completa: `PRPDapp/main.py:2245` + `PRPDapp/PRPD ? GUI Unificada (README).pdf`.
+- Export conclusiones JSON serializable: `PRPDapp/main.py:5225` usa default para numpy arrays.
+- Mascara aplicada antes del procesamiento: `PRPDapp/pipeline.py:95` filtra `raw_data` y todo el flujo usa PRPD enmascarado (plots/KPI/ANN/severidad).
+- ANN a 5 clases (Corona/Superficial/Tracking/Cavidad/Flotante/Ruido) + mixto/empates + validacion: `PRPDapp/pipeline.py:16` (probs filtradas/renormalizadas, `ann.valid`, regla Mixto 2%).
+- ANN evita empates 3-vias: `PRPDapp/pipeline.py:226` marca invalid si top1-top3 <= 2% y cae a heuristic_top (sin 33.3% ficticio).
+- Display ANN y texto dominante desde resultado: `PRPDapp/main.py:3833` y `PRPDapp/main.py:3846` consumen `ann.display` (sin recalcular).
+- KPI consolidado con n_ang_ratio + gap: `PRPDapp/pipeline.py:368`.
+- Layout consistente y sin empujes: reanclaje GridSpec `PRPDapp/main.py:3564`, colorbar con Ax dedicado `PRPDapp/main.py:783` y `PRPDapp/main.py:1025`, reset en ANN/GAP `PRPDapp/ui_render.py:661`, mini-hist legible en KPI avanzados `PRPDapp/main.py:3112`.
+- Mascara fija por grados con offset: `PRPDapp/pipeline.py:31` aplica mascara en fase alineada (no se desplaza al cambiar 0/120/240).
+- Mascara Void mantiene rangos y no corta lineas: `PRPDapp/pipeline.py:34` aplica la mascara solo como vista y conserva clustering; `PRPDapp/main.py:602` restaura rangos.
+- ANN UI fuerza fallback si empates o ann.valid=False: `PRPDapp/main.py:3896` evita 33.33/33.33/33.33 en pantalla.
+- Severidad basada en P50/P5 y vida en tiempo: `PRPDapp/pd_rules.py:171` y `PRPDapp/severity_oil.py:19` corrigen coherencia con gap-time.
+- Acciones y textos sin truncar; se elimina badge LifeTime redundante: `PRPDapp/ui_render.py:560`.
+- S2 Strong con fallback si recorta demasiado: `PRPDapp/prpd_core.py:950`.
+- ANN incluye Ruido en display (toggle oculta clases en UI): `PRPDapp/pipeline.py:15` + `PRPDapp/main.py:3890`.
+- Gap-time extenso total se usa en conclusiones: `PRPDapp/main.py:2297` + `PRPDapp/conclusion_rules.py:96`.
+- Cola critica (P5) visible en Conclusiones y texto de vida remanente restaurado: `PRPDapp/ui_render.py:640`.
+- Mascara Corona fuerza ANN=100% Corona: `PRPDapp/pipeline.py:352` + `PRPDapp/main.py:2235`.
+- ANGPD combinado/nubes responden a Pixel/Qty: recálculo de ANGPD/ANGPD qty + ang_proj + FA profile en `PRPDapp/pipeline.py:271`.
+
+## 1) ?De donde vienen los KPIs de **Conclusiones**?
+
+- `PRPDapp/pipeline.py:23` (compute_all) calcula:
+  - KPIs base desde `PRPDapp/logic.py::compute_pd_metrics` -> `result["metrics"]`.
+  - KPIs avanzados desde `PRPDapp/metrics/advanced_kpi.py::compute_advanced_metrics` -> `result["metrics_advanced"]`.
+  - Bloque de conclusiones desde `PRPDapp/conclusion_rules.py::build_conclusion_block` -> `result["conclusion_block"]`.
 - Render: `PRPDapp/ui_render.py::render_conclusions` consume `payload["metrics"]`, `payload["metrics_advanced"]` y `payload["conclusion_block"]`.
+- `PRPDapp/main.py::_get_conclusion_insight` solo formatea texto con datos ya calculados.
 
 ## 2) ¿Por qué salen muchos “N/D”?
 

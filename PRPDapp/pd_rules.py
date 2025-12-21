@@ -198,14 +198,16 @@ def rule_based_scores(features: dict) -> dict:
 
 
 def _infer_stage_from_gap_and_energy(features: dict) -> str:
+    gap_p50 = _safe(features.get("gap_p50_ms"))
     gap_p5 = _safe(features.get("gap_p5_ms"))
     ratio = _safe(features.get("n_angpd_angpd_ratio"))
     pulses = _safe(features.get("total_pulses"))
-    if gap_p5 <= 0:
+    gap_primary = gap_p50 if gap_p50 > 0 else gap_p5
+    if gap_primary <= 0:
         stage = "no_evaluada"
-    elif gap_p5 < TH_GAP_P5_AVANZADA_MAX:
+    elif gap_primary <= 3.0:
         stage = "avanzada"
-    elif gap_p5 < TH_GAP_P5_DESARROLLO_MAX:
+    elif gap_primary <= 7.0:
         stage = "en_desarrollo"
     else:
         stage = "incipiente"
@@ -217,14 +219,16 @@ def _infer_stage_from_gap_and_energy(features: dict) -> str:
 
 
 def _compute_severity_index(features: dict) -> float:
+    gap_p50 = _safe(features.get("gap_p50_ms"))
     gap_p5 = _safe(features.get("gap_p5_ms"))
     ratio = _safe(features.get("n_angpd_angpd_ratio"))
     pulses = _safe(features.get("total_pulses"))
     p95 = _safe(features.get("fa_p95_amp") or features.get("p95_global_amp"))
     # Normalizaciones
     s_gap = 0.0
-    if gap_p5 > 0:
-        s_gap = max(0.0, min(1.0, (15.0 - gap_p5) / 15.0))
+    gap_primary = gap_p50 if gap_p50 > 0 else gap_p5
+    if gap_primary > 0:
+        s_gap = max(0.0, min(1.0, (7.0 - gap_primary) / 4.0))
     s_ratio = max(0.0, min(1.0, ratio / 30.0))
     s_pulses = max(0.0, min(1.0, pulses / 5000.0))
     # p95 suele venir en escala 0..100 (amplitud); normalizar a 0..1 si aplica

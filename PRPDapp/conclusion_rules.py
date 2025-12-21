@@ -10,35 +10,35 @@ REGLAS_CONCLUSION: Dict[str, Dict[str, str]] = {
         "stage": "Etapa 1",
         "fa_range": "FA < 5",
         "severity": "Baja",
-        "lifetime_band": ">85%",
+        "lifetime_band": "5+ anos",
         "actions": "Monitoreo semestral. Revisar puntos accesibles y aisladores externos.",
     },
     "Descarga Corona": {
         "stage": "Etapa 2",
         "fa_range": "5 < FA < 15",
         "severity": "Media",
-        "lifetime_band": "60-85%",
+        "lifetime_band": "1-5 anos",
         "actions": "Medicion mensual. Inspeccion visual de bornes, ventilacion y descarga externa.",
     },
     "Descarga Interna": {
         "stage": "Etapa 3",
         "fa_range": "FA > 15",
         "severity": "Alta",
-        "lifetime_band": "<60%",
+        "lifetime_band": "meses-1 ano",
         "actions": "Inspeccion urgente interna. Corroborar con DGA, termografia y ultrasonido. Considerar paro programado.",
     },
     "Descarga Cavidad": {
         "stage": "Etapa 2-3",
         "fa_range": "10 < FA < 20",
         "severity": "Alta",
-        "lifetime_band": "50-70%",
+        "lifetime_band": "1-3 anos",
         "actions": "Confirmar con nube S3. Analizar historico de gas y humedad. Revisar sellos y conexion de potencia.",
     },
     "Descarga Compleja": {
         "stage": "Etapas mixtas",
         "fa_range": "FA > 25",
         "severity": "Critica",
-        "lifetime_band": "<45%",
+        "lifetime_band": "<6 meses",
         "actions": "Priorizar estudio completo. Definir ventana de reemplazo o reconexion parcial.",
     },
 }
@@ -84,13 +84,15 @@ def _band_from_score(score: Any) -> Optional[str]:
         val = float(score)
     except Exception:
         return None
-    if val > 85:
-        return ">85%"
-    if val > 60:
-        return "60-85%"
-    if val > 45:
-        return "50-70%"
-    return "<45%"
+    if val >= 80:
+        return "5+ anos"
+    if val >= 60:
+        return "1-5 anos"
+    if val >= 40:
+        return "1-3 anos"
+    if val >= 20:
+        return "meses-1 ano"
+    return "<6 meses"
 
 
 def _pick_first(mapping: Dict[str, Any], keys: list[str]) -> Any:
@@ -116,6 +118,8 @@ def build_conclusion_block(
     metrics_adv = res.get("metrics_advanced", {}) if isinstance(res, dict) else {}
     metrics = res.get("metrics", {}) if isinstance(res, dict) else {}
     gap_stats = res.get("gap_stats", {}) if isinstance(res, dict) else {}
+    gap_stats_total = res.get("gap_stats_total") if isinstance(res, dict) else None
+    gap_for_conclusion = gap_stats_total if isinstance(gap_stats_total, dict) and gap_stats_total else gap_stats
     ann_block = res.get("ann") if isinstance(res, dict) else None
 
     asset_type = res.get("asset_type") or "oil_mineral"
@@ -137,7 +141,7 @@ def build_conclusion_block(
             "fa_kpis": fa_kpis,
             "kpis": kpis,
         },
-        gap_stats if isinstance(gap_stats, dict) else {},
+        gap_for_conclusion if isinstance(gap_for_conclusion, dict) else {},
         ann_block,
         ruleset={"asset_type": asset_type},
     )

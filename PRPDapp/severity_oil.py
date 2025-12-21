@@ -28,13 +28,15 @@ def _band_from_score(score: float | int | None) -> str:
         val = float(score)
     except Exception:
         return "N/D"
-    if val >= 85:
-        return ">85%"
+    if val >= 80:
+        return "5+ anos"
     if val >= 60:
-        return "60-85%"
-    if val >= 45:
-        return "45-60%"
-    return "<45%"
+        return "1-5 anos"
+    if val >= 40:
+        return "1-3 anos"
+    if val >= 20:
+        return "meses-1 ano"
+    return "<6 meses"
 
 
 def _severity_level_display(severity_index_0_10: float | None) -> str:
@@ -64,6 +66,22 @@ def _risk_display(risk_level: str | None) -> str:
     if r.startswith("alt"):
         return "Alto"
     return risk_level
+
+
+def _gap_score(value_ms: float | None) -> float | None:
+    if value_ms is None:
+        return None
+    try:
+        val = float(value_ms)
+    except Exception:
+        return None
+    if val >= 500.0:
+        return 100.0
+    if val > 7.0:
+        return 85.0
+    if val > 3.0:
+        return 60.0
+    return 30.0
 
 
 def _stage_display(stage_code: str | None, *, has_gap: bool) -> str:
@@ -125,7 +143,9 @@ def compute_severity_oil(
     gap_p5 = _pick_first(gap, ["p5_ms", "P5_ms"]) or _pick_first(metrics, ["gap_p5"])
     gap_p50 = _to_float(gap_p50)
     gap_p5 = _to_float(gap_p5)
-    has_gap = gap_p5 is not None and gap_p5 > 0
+    gap_primary = gap_p50 if (gap_p50 is not None and gap_p50 > 0) else gap_p5
+    no_gap = gap_primary is None or gap_primary >= 500.0
+    has_gap = (gap_primary is not None and gap_primary > 0 and gap_primary < 500.0)
 
     ratio = _pick_first(kpis_block, ["n_angpd_angpd_ratio", "n_ang_ratio"])
     if ratio is None:
@@ -193,10 +213,46 @@ def compute_severity_oil(
         if has_gap
         else sev_level_internal
     )
+    if no_gap:
+        stage_code = "no_evaluada"
+        severity_index = 0.0
+        risk_internal = "sin descargas"
+        sev_level_internal = pd_rules._severity_level_from_index(severity_index)
+    elif gap_primary is not None:
+        if gap_primary > 7.0:
+            severity_index = min(severity_index, 2.9)
+            risk_internal = "bajo"
+        elif gap_primary > 3.0:
+            severity_index = max(3.0, min(severity_index, 5.9))
+            risk_internal = "medio"
+        else:
+            severity_index = max(severity_index, 6.0)
+            risk_internal = "alto"
+        sev_level_internal = pd_rules._severity_level_from_index(severity_index)
+        if gap_p5 is not None and gap_p5 > 0 and gap_p5 <= 3.0 and risk_internal == "bajo":
+            risk_internal = "medio"
 
-    lifetime_score = pd_rules._compute_lifetime_score(stage_code, severity_index)
+    kpi_score = max(0.0, min(100.0, 100.0 - float(severity_index or 0.0) * 10.0))
+    p50_score = _gap_score(gap_p50)
+    p5_score = _gap_score(gap_p5)
+    if no_gap:
+        lifetime_score = kpi_score
+    else:
+        base_p50 = p50_score if p50_score is not None else kpi_score
+        base_p5 = p5_score if p5_score is not None else kpi_score
+        lifetime_score = 0.55 * base_p50 + 0.15 * base_p5 + 0.30 * kpi_score
+
+    ann_is_ruido = bool(ann_probs) and class_id == "ruido_baja"
+    if ann_is_ruido:
+        lifetime_score = 100.0
+        severity_index = 0.0
+        risk_internal = "sin descargas"
+        stage_code = "no_evaluada"
+        sev_level_internal = pd_rules._severity_level_from_index(severity_index)
+
+    lifetime_score = max(0.0, min(100.0, float(lifetime_score)))
     lifetime_band = _band_from_score(lifetime_score)
-    lifetime_text = pd_rules._map_lifetime_band(lifetime_score)[1]
+    lifetime_text = pd_rules._map_lifetime_band(int(round(lifetime_score)))[1]
 
     actions = pd_rules._recommend_actions(class_id, stage_code, sev_level_internal, risk_internal)
     stage = _stage_display(stage_code, has_gap=has_gap)
@@ -238,4 +294,3 @@ def compute_severity_oil(
         "ruleset": {"version": getattr(pd_rules, "RULESET_VERSION", None), **ruleset},
         "ann_source": ann_source,
     }
-

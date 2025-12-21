@@ -808,7 +808,8 @@ def process_prpd(path: Path, out_root: Path, force_phase_offsets=None, fast_mode
                  filter_level: str = "weak",
                  phase_mask: list[tuple[float, float]] | None = None,
                  pixel_deciles_keep: list[int] | None = None,
-                 qty_deciles_keep: list[int] | None = None) -> dict:
+                 qty_deciles_keep: list[int] | None = None,
+                 raw_data: dict | None = None) -> dict:
     out_root = Path(out_root)
     # Asegurar subdirectorios de auditorÃ­a
     try:
@@ -816,7 +817,16 @@ def process_prpd(path: Path, out_root: Path, force_phase_offsets=None, fast_mode
         (out_root/"filtered").mkdir(parents=True, exist_ok=True)
     except Exception:
         pass
-    data = load_prpd(path)
+    if raw_data is None:
+        data = load_prpd(path)
+    else:
+        data = raw_data
+    if "amp_norm" not in data:
+        try:
+            amp_vals = np.asarray(data.get("amplitude", []), dtype=float)
+            data["amp_norm"] = robust_scale(amp_vals) if amp_vals.size else np.zeros(0, dtype=float)
+        except Exception:
+            data["amp_norm"] = np.zeros(0, dtype=float)
     mask_ranges = _normalize_phase_mask(phase_mask)
     pixel_deciles_selected = _normalize_deciles_keep(pixel_deciles_keep)
     qty_deciles_selected = _normalize_deciles_keep(qty_deciles_keep)
@@ -933,6 +943,22 @@ def process_prpd(path: Path, out_root: Path, force_phase_offsets=None, fast_mode
     else:
         labels = np.zeros(0, dtype=int)
         keep = np.zeros(0, dtype=bool)
+
+    if (not special_cfg) and (fl.startswith("s2") or fl.startswith("strong")) and ph_g.size:
+        keep_ratio = float(np.mean(keep)) if keep.size else 0.0
+        if keep_ratio < 0.15:
+            eps_fb = 0.07 if has_noise else 0.09
+            min_samples_fb = 16 if has_noise else 12
+            min_share_fb = 0.06
+            labels_fb, keep_fb = cluster_and_prune(
+                ph_g, amp_norm_g,
+                eps=eps_fb, min_samples=min_samples_fb, min_share=min_share_fb,
+                force_multi=force_multi,
+                fallback_eps=fallback_eps,
+                keep_all=keep_all,
+            )
+            if keep_fb.sum() > keep.sum():
+                labels, keep = labels_fb, keep_fb
     # Aplicar máscaras/filtros solo como recorte final (post-clustering) para no distorsionar
     # el denoising/clustering (y evitar que "Pixel" corte el patrón por fase).
     final_keep = keep.copy() if keep.size else keep
