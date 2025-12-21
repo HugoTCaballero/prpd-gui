@@ -4676,26 +4676,10 @@ class PRPDWindow(QMainWindow):
             return
         try:
             current_profile = self._collect_current_profile()
-            if self.last_run_profile and self.last_run_profile != current_profile:
-                diff_keys = {
-                    k
-                    for k in current_profile.keys()
-                    if current_profile.get(k) != self.last_run_profile.get(k)
-                }
-                view_only = diff_keys.issubset({"pixel", "qty", "qty_quints"})
-                if view_only:
-                    try:
-                        self._refresh_last_result_filters()
-                    except Exception:
-                        pass
-                else:
-                    QMessageBox.warning(
-                        self,
-                        "Exportar",
-                        "Los parametros actuales no coinciden con el ultimo procesamiento.\n"
-                        "Pulsa 'Procesar' antes de exportar para garantizar coherencia.",
-                    )
-                    return
+            try:
+                self._refresh_last_result_filters()
+            except Exception:
+                pass
             outdir = self._get_output_dir()
             profile_tag = self._build_profile_tag(current_profile)
             session_dir = self._create_session_dir(outdir, profile_tag)

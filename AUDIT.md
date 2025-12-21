@@ -9,7 +9,7 @@
 - PDF export actualizado a informe multipagina con Nubes y KPI avanzados: `PRPDapp/report.py:1`.
 - Ayuda/README abre PDF y README PDF regenerado desde ayuda completa: `PRPDapp/main.py:2245` + `PRPDapp/PRPD ? GUI Unificada (README).pdf`.
 - Export conclusiones JSON serializable: `PRPDapp/main.py:5225` usa default para numpy arrays.
-- Exportar resultados permite cambios solo de vista (pixel/qty) sin reprocesar: `PRPDapp/main.py:4680`.
+- Exportar resultados no bloquea por cambios de fase/filtro/mascara: `PRPDapp/main.py:4680`.
 - Mascara aplicada antes del procesamiento: `PRPDapp/pipeline.py:95` filtra `raw_data` y todo el flujo usa PRPD enmascarado (plots/KPI/ANN/severidad).
 - ANN a 5 clases (Corona/Superficial/Tracking/Cavidad/Flotante/Ruido) + mixto/empates + validacion: `PRPDapp/pipeline.py:16` (probs filtradas/renormalizadas, `ann.valid`, regla Mixto 2%).
 - ANN evita empates 3-vias: `PRPDapp/pipeline.py:226` marca invalid si top1-top3 <= 2% y cae a heuristic_top (sin 33.3% ficticio).
